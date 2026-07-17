@@ -2,6 +2,20 @@ using System.Collections.Generic;
 
 namespace Serhat.Forge.CloudScript.Framework.Monetization.Domain;
 
+public static class ProductGrantLimits
+{
+    public const int MaxProductIdLength = 256;
+    public const int MaxEconomyItemsPerProduct = 16;
+    public const int MaxEconomyItemIdLength = 256;
+    public const int MaxConsumableQuantity = 1_000_000;
+    public const int MaxTierKeyLength = 128;
+    public const int MaxTierPrecedence = 10_000;
+    public const int MaxMetadataEntries = 16;
+    public const int MaxMetadataKeyLength = 64;
+    public const int MaxMetadataValueLength = 512;
+    public const int MaxMetadataUtf8Bytes = 4 * 1024;
+}
+
 /// <summary>
 /// Product configuration from ALLOWED_PRODUCTS_JSON.
 /// </summary>
@@ -36,6 +50,12 @@ public sealed class ProductConfig
     /// For subscriptions: tier precedence (higher = better).
     /// </summary>
     public int TierPrecedence { get; set; }
+
+    /// <summary>
+    /// Optional server-authoritative metadata written to granted PlayFab inventory stacks.
+    /// Client request metadata is never merged into this payload.
+    /// </summary>
+    public Dictionary<string, string>? GrantMetadata { get; set; }
 
     /// <summary>
     /// Whether this product is enabled.

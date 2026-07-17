@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
@@ -72,6 +73,99 @@ public class WebhookParserTests
     }
 
     [Fact]
+    public void AppleNotificationParser_FullOneTimeRefund_MapsSignedReconciliationData()
+    {
+        var parser = CreateDevelopmentAppleParser();
+        var revocationDate = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var requestBody = CreateAppleNotification(
+            "REFUND",
+            new
+            {
+                transactionId = "one-time-transaction",
+                originalTransactionId = "one-time-transaction",
+                productId = "remove_ads",
+                bundleId = "com.test.app",
+                environment = "Production",
+                type = "Non-Consumable",
+                quantity = 1,
+                revocationDate = revocationDate.ToUnixTimeMilliseconds(),
+                revocationType = "REFUND_FULL",
+                revocationPercentage = 100_000
+            });
+
+        var result = parser.Parse(requestBody);
+
+        Assert.True(result.IsSuccess);
+        Assert.NotNull(result.Event);
+        Assert.Equal(WebhookEventType.Refunded, result.Event.EventType);
+        Assert.False(result.Event.IsSubscription);
+        Assert.True(result.Event.IsFullRefund);
+        Assert.Null(result.Event.SubscriptionKey);
+        Assert.Equal("one-time-transaction", result.Event.TransactionId);
+        Assert.Equal("REFUND_FULL", result.Event.RevocationType);
+        Assert.Equal(100_000, result.Event.RevocationPercentage);
+        Assert.Equal(revocationDate.ToUnixTimeMilliseconds(),
+            new DateTimeOffset(result.Event.EventTimestampUtc).ToUnixTimeMilliseconds());
+        Assert.StartsWith("apple-refund:", result.Event.EntitlementOperationId, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AppleNotificationParser_ProratedSubscriptionRefund_PreservesSubscriptionIdentity()
+    {
+        var parser = CreateDevelopmentAppleParser();
+        var requestBody = CreateAppleNotification(
+            "REFUND",
+            new
+            {
+                transactionId = "renewal-transaction",
+                originalTransactionId = "original-transaction",
+                productId = "premium_monthly",
+                bundleId = "com.test.app",
+                environment = "Production",
+                type = "Auto-Renewable Subscription",
+                quantity = 1,
+                revocationDate = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                revocationType = "REFUND_PRORATED",
+                revocationPercentage = 50_000
+            });
+
+        var result = parser.Parse(requestBody);
+
+        Assert.True(result.IsSuccess);
+        Assert.NotNull(result.Event);
+        Assert.True(result.Event.IsSubscription);
+        Assert.False(result.Event.IsFullRefund);
+        Assert.Equal("apple:original-transaction", result.Event.SubscriptionKey);
+        Assert.Equal("REFUND_PRORATED", result.Event.RevocationType);
+        Assert.Equal(50_000, result.Event.RevocationPercentage);
+    }
+
+    [Fact]
+    public void AppleNotificationParser_RefundWithoutTransaction_FailsClosed()
+    {
+        var parser = CreateDevelopmentAppleParser();
+        var payload = JsonSerializer.Serialize(new
+        {
+            notificationType = "REFUND",
+            notificationUUID = "refund-without-transaction",
+            data = new
+            {
+                bundleId = "com.test.app",
+                environment = "Production"
+            }
+        });
+        var requestBody = JsonSerializer.Serialize(new
+        {
+            signedPayload = CreateFakeJws(payload, raw: true)
+        });
+
+        var result = parser.Parse(requestBody);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("MISSING_REFUND_IDENTITY", result.ErrorCode);
+    }
+
+    [Fact]
     public void AppleNotificationParser_InvalidJson_ReturnsFailure()
     {
         // Arrange
@@ -129,13 +223,14 @@ public class WebhookParserTests
         {
             version = "1.0",
             packageName = "com.test.app",
-            eventTimeMillis = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            eventTimeMillis = DateTimeOffset.UtcNow
+                .ToUnixTimeMilliseconds()
+                .ToString(CultureInfo.InvariantCulture),
             subscriptionNotification = new
             {
                 version = "1.0",
                 notificationType = 4, // SUBSCRIPTION_PURCHASED
-                purchaseToken = "purchase_token_001",
-                subscriptionId = "premium_monthly"
+                purchaseToken = "purchase_token_001"
             }
         });
 
@@ -156,10 +251,12 @@ public class WebhookParserTests
         // Assert
         Assert.True(result.IsSuccess);
         Assert.False(result.IsTestNotification);
-        Assert.NotNull(result.Event);
-        Assert.Equal(WebhookEventType.InitialPurchase, result.Event.EventType);
-        Assert.Equal(Platform.Google, result.Event.Platform);
-        Assert.Equal("premium_monthly", result.Event.ProductId);
+        Assert.NotNull(result.Notification);
+        Assert.Equal(
+            GoogleRtdnNotificationKind.SubscriptionStateChanged,
+            result.Notification.Kind);
+        Assert.Equal(4, result.Notification.NotificationType);
+        Assert.Null(result.Notification.ProductIdHint);
     }
 
     [Fact]
@@ -198,7 +295,7 @@ public class WebhookParserTests
         Assert.True(result.IsSuccess);
         Assert.True(result.IsTestNotification);
         Assert.Equal("1.0", result.TestVersion);
-        Assert.Null(result.Event);
+        Assert.Null(result.Notification);
     }
 
     [Fact]
@@ -239,8 +336,9 @@ public class WebhookParserTests
 
         // Assert
         Assert.True(result.IsSuccess);
-        Assert.NotNull(result.Event);
-        Assert.Equal(WebhookEventType.Refunded, result.Event.EventType);
+        Assert.NotNull(result.Notification);
+        Assert.Equal(GoogleRtdnNotificationKind.VoidedPurchase, result.Notification.Kind);
+        Assert.Equal(1, result.Notification.RefundType);
     }
 
     [Fact]
@@ -309,28 +407,16 @@ public class WebhookParserTests
     }
 
     [Fact]
-    public void GoogleRtdnParser_AllSubscriptionNotificationTypes_MapCorrectly()
+    public void GoogleRtdnParser_SubscriptionNotificationType_IsOnlyPreservedAsHint()
     {
         // Arrange
         var loggerMock = new Mock<ILogger<GoogleRtdnParser>>();
         var config = new GoogleRtdnConfig { ExpectedPackageName = "com.test.app" };
         var parser = new GoogleRtdnParser(config, loggerMock.Object);
 
-        var testCases = new[]
-        {
-            (1, WebhookEventType.Recovered),        // SUBSCRIPTION_RECOVERED
-            (2, WebhookEventType.Renewed),          // SUBSCRIPTION_RENEWED
-            (3, WebhookEventType.Cancelled),        // SUBSCRIPTION_CANCELED
-            (4, WebhookEventType.InitialPurchase),  // SUBSCRIPTION_PURCHASED
-            (5, WebhookEventType.GracePeriodStarted), // SUBSCRIPTION_ON_HOLD
-            (6, WebhookEventType.GracePeriodStarted), // SUBSCRIPTION_IN_GRACE_PERIOD
-            (7, WebhookEventType.Resubscribed),     // SUBSCRIPTION_RESTARTED
-            (10, WebhookEventType.Paused),          // SUBSCRIPTION_PAUSED
-            (12, WebhookEventType.Revoked),         // SUBSCRIPTION_REVOKED
-            (13, WebhookEventType.Expired)          // SUBSCRIPTION_EXPIRED
-        };
+        var notificationTypes = new[] { 1, 2, 3, 4, 5, 6, 7, 9, 10, 12, 13 };
 
-        foreach (var (notificationType, expectedEventType) in testCases)
+        foreach (var notificationType in notificationTypes)
         {
             var notificationData = JsonSerializer.Serialize(new
             {
@@ -360,13 +446,45 @@ public class WebhookParserTests
 
             // Assert
             Assert.True(result.IsSuccess, $"Failed for notification type {notificationType}");
-            Assert.Equal(expectedEventType, result.Event!.EventType);
+            Assert.Equal(
+                GoogleRtdnNotificationKind.SubscriptionStateChanged,
+                result.Notification!.Kind);
+            Assert.Equal(notificationType, result.Notification.NotificationType);
         }
     }
 
     #endregion
 
     #region Helper Methods
+
+    private static AppleNotificationParser CreateDevelopmentAppleParser() =>
+        new(
+            new AppleNotificationConfig
+            {
+                BundleId = "com.test.app",
+                SkipSignatureValidation = true,
+                HostEnvironmentName = "Development"
+            },
+            Mock.Of<ILogger<AppleNotificationParser>>());
+
+    private static string CreateAppleNotification(string notificationType, object transaction)
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            notificationType,
+            notificationUUID = $"notification-{Guid.NewGuid():N}",
+            data = new
+            {
+                bundleId = "com.test.app",
+                environment = "Production",
+                signedTransactionInfo = CreateFakeJws(transaction)
+            }
+        });
+        return JsonSerializer.Serialize(new
+        {
+            signedPayload = CreateFakeJws(payload, raw: true)
+        });
+    }
 
     private static string CreateFakeJws(object payload, bool raw = false)
     {

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -6,12 +7,16 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Moq;
 using Serhat.Forge.CloudScript.Framework.Monetization.Configuration;
+using Serhat.Forge.CloudScript.Framework.Monetization.Domain;
 using Serhat.Forge.CloudScript.Framework.Monetization.Persistence;
+using Serhat.Forge.CloudScript.Framework.Monetization.Services;
 using Serhat.Forge.CloudScript.Framework.Monetization.Verification;
 using Serhat.Forge.CloudScript.Framework.Monetization.Webhooks;
+using Serhat.Forge.CloudScript.Functions.Monetization;
 using Xunit;
 
 namespace Serhat.Forge.CloudScript.Tests.Monetization;
@@ -136,6 +141,55 @@ public sealed class SecurityHardeningTests
     }
 
     [Fact]
+    public void DevelopmentFakeVerifier_ResolvesRtdnWithDisabledAuthoritativeProvider()
+    {
+        var config = new MonetizationConfig
+        {
+            EnvironmentName = "Development",
+            UseFakeVerifier = true,
+            Google = new GoogleStoreConfig { RequireObfuscatedAccountId = false }
+        };
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMonetization(config);
+
+        using var provider = services.BuildServiceProvider();
+
+        Assert.IsType<DisabledGooglePlaySubscriptionSnapshotProvider>(
+            provider.GetRequiredService<IGooglePlaySubscriptionSnapshotProvider>());
+        Assert.NotNull(provider.GetRequiredService<GoogleRtdnReconciliationService>());
+    }
+
+    [Fact]
+    public async Task DisabledAppleStore_DiVerifierFailsClosed()
+    {
+        var product = CreateValidProduct();
+        var config = CreateDevelopmentConfig(product.ProductId, product);
+        config.UseFakeVerifier = true;
+        config.Apple.Enabled = false;
+        config.Google.Enabled = true;
+        config.Google.RequireObfuscatedAccountId = false;
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMonetization(config);
+        using var provider = services.BuildServiceProvider();
+
+        var result = await provider
+            .GetRequiredService<PurchaseVerificationService>()
+            .VerifyAndGrantAsync(new VerifyPurchaseServiceRequest
+            {
+                PlayerId = "player-1",
+                Platform = Platform.Apple,
+                ProductId = product.ProductId,
+                TransactionId = "apple-disabled-transaction",
+                ReceiptPayload = string.Empty
+            });
+
+        Assert.False(result.Success);
+        Assert.Equal("STORE_DISABLED", result.ErrorCode);
+    }
+
+    [Fact]
     public void ProductionConfiguration_AppleSignatureBypass_FailsFast()
     {
         var config = new MonetizationConfig
@@ -146,6 +200,281 @@ public sealed class SecurityHardeningTests
 
         var exception = Assert.Throws<InvalidOperationException>(config.ValidateForStartup);
         Assert.Contains("APPLE_SKIP_SIGNATURE_VALIDATION", exception.Message);
+    }
+
+    [Fact]
+    public void ProductionConfiguration_AppleAccountBindingDisabled_FailsFast()
+    {
+        var config = new MonetizationConfig
+        {
+            EnvironmentName = "Production",
+            Apple = new AppleStoreConfig { RequireAppAccountToken = false }
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(config.ValidateForStartup);
+        Assert.Contains("APPLE_REQUIRE_APP_ACCOUNT_TOKEN", exception.Message);
+    }
+
+    [Fact]
+    public void ProductionConfiguration_GoogleOnly_DoesNotRequireAppleSecrets()
+    {
+        var config = CreateProductionConfig();
+        config.Apple = new AppleStoreConfig { Enabled = false };
+
+        config.ValidateForStartup();
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMonetization(config);
+        using var provider = services.BuildServiceProvider();
+        Assert.IsType<GooglePlayStoreVerifier>(
+            provider.GetRequiredService<IGooglePlaySubscriptionSnapshotProvider>());
+    }
+
+    [Fact]
+    public void ProductionConfiguration_AppleOnly_DoesNotRequireGoogleSecrets()
+    {
+        using var certificates = TestCertificateChain.Create();
+        var config = CreateProductionConfig();
+        config.Apple.TrustedRootCertificatesBase64 =
+            Convert.ToBase64String(certificates.Root.RawData);
+        config.Google = new GoogleStoreConfig { Enabled = false };
+
+        config.ValidateForStartup();
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMonetization(config);
+        using var provider = services.BuildServiceProvider();
+        Assert.IsType<DisabledGooglePlaySubscriptionSnapshotProvider>(
+            provider.GetRequiredService<IGooglePlaySubscriptionSnapshotProvider>());
+    }
+
+    [Fact]
+    public void ProductionConfiguration_AllStoresDisabled_FailsFast()
+    {
+        var config = CreateProductionConfig();
+        config.Apple.Enabled = false;
+        config.Google.Enabled = false;
+
+        var exception = Assert.Throws<InvalidOperationException>(config.ValidateForStartup);
+
+        Assert.Contains("At least one store", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AppleVerifierConfiguration_MapsApplicationAndAccountBindingPolicy()
+    {
+        var config = new MonetizationConfig
+        {
+            Apple = new AppleStoreConfig
+            {
+                AppAppleId = 123_456,
+                RequireAppAccountToken = false
+            }
+        };
+
+        var verifierConfig = config.ToAppleVerifierConfig();
+
+        Assert.Equal(123_456, verifierConfig.AppAppleId);
+        Assert.False(verifierConfig.RequireAppAccountToken);
+    }
+
+    [Fact]
+    public void VerifyPurchaseTransport_GoogleWithoutTransactionId_IsValid()
+    {
+        var error = VerifyPurchaseFunction.ValidateRequiredFields(new VerifyPurchaseRequestDto
+        {
+            Platform = "google",
+            ProductId = "coins_100",
+            ReceiptPayload = "purchase-token"
+        });
+
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public void VerifyPurchaseTransport_AppleWithoutTransactionId_IsRejected()
+    {
+        var error = VerifyPurchaseFunction.ValidateRequiredFields(new VerifyPurchaseRequestDto
+        {
+            Platform = "apple",
+            ProductId = "coins_100",
+            ReceiptPayload = "signed-transaction"
+        });
+
+        Assert.NotNull(error);
+        Assert.Contains("TransactionId", error);
+    }
+
+    [Fact]
+    public void VerifyPurchaseTransport_AppleTransactionWithoutReceiptPayload_IsValid()
+    {
+        var error = VerifyPurchaseFunction.ValidateRequiredFields(new VerifyPurchaseRequestDto
+        {
+            Platform = "apple",
+            ProductId = "remove_ads",
+            TransactionId = "apple-transaction-1",
+            ReceiptPayload = string.Empty
+        });
+
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public void VerifyPurchaseTransport_UnknownPlatform_ReachesServiceValidation()
+    {
+        var error = VerifyPurchaseFunction.ValidateRequiredFields(new VerifyPurchaseRequestDto
+        {
+            Platform = "unknown-store",
+            ProductId = "coins_100",
+            ReceiptPayload = "opaque-receipt"
+        });
+
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public void ProductAllowlist_DictionaryKeyMismatch_FailsAtStartup()
+    {
+        AssertInvalidProduct(
+            CreateValidProduct(),
+            "different-key",
+            "must exactly match productId");
+    }
+
+    [Fact]
+    public void ProductAllowlist_DuplicateEconomyItem_FailsAtStartup()
+    {
+        var product = CreateValidProduct();
+        product.EconomyItemIds.Add("currency_coins");
+
+        AssertInvalidProduct(product, product.ProductId, "duplicate Economy item ID");
+    }
+
+    [Fact]
+    public void ProductAllowlist_InvalidConsumableQuantity_FailsAtStartup()
+    {
+        var product = CreateValidProduct();
+        product.Quantity = 0;
+
+        AssertInvalidProduct(product, product.ProductId, "quantity must be between");
+    }
+
+    [Fact]
+    public void ProductAllowlist_SubscriptionWithoutTier_FailsAtStartup()
+    {
+        var product = CreateValidProduct();
+        product.Type = ProductType.Subscription;
+        product.Quantity = 1;
+        product.TierKey = null;
+
+        AssertInvalidProduct(product, product.ProductId, "tierKey is required");
+    }
+
+    [Fact]
+    public void ProductAllowlist_NonSubscriptionTierFields_FailAtStartup()
+    {
+        var product = CreateValidProduct();
+        product.TierKey = "forged-tier";
+        product.TierPrecedence = 1;
+
+        AssertInvalidProduct(product, product.ProductId, "cannot define tierKey");
+    }
+
+    [Fact]
+    public void ProductAllowlist_OverlongEconomyItemId_FailsAtStartup()
+    {
+        var product = CreateValidProduct();
+        product.EconomyItemIds[0] = new string('i', 257);
+
+        AssertInvalidProduct(product, product.ProductId, "overlong Economy item ID");
+    }
+
+    [Fact]
+    public void ProductAllowlist_ExcessiveGrantMetadata_FailsAtStartup()
+    {
+        var product = CreateValidProduct();
+        product.GrantMetadata = Enumerable.Range(0, 17).ToDictionary(
+            index => $"key-{index}",
+            _ => "value",
+            StringComparer.Ordinal);
+
+        AssertInvalidProduct(product, product.ProductId, "more than 16 entries");
+    }
+
+    [Fact]
+    public void ProductAllowlist_OverlongGrantMetadataValue_FailsAtStartup()
+    {
+        var product = CreateValidProduct();
+        product.GrantMetadata = new Dictionary<string, string>
+        {
+            ["source"] = new string('v', 513)
+        };
+
+        AssertInvalidProduct(product, product.ProductId, "exceeds 512 characters");
+    }
+
+    [Fact]
+    public void ProductAllowlist_OverlongGrantMetadataKey_FailsAtStartup()
+    {
+        var product = CreateValidProduct();
+        product.GrantMetadata = new Dictionary<string, string>
+        {
+            [new string('k', 65)] = "value"
+        };
+
+        AssertInvalidProduct(product, product.ProductId, "overlong grantMetadata key");
+    }
+
+    [Fact]
+    public void ProductAllowlist_GrantMetadataTotalSize_FailsAtStartup()
+    {
+        var product = CreateValidProduct();
+        product.GrantMetadata = Enumerable.Range(0, 9).ToDictionary(
+            index => $"key-{index}",
+            _ => new string('v', 500),
+            StringComparer.Ordinal);
+
+        AssertInvalidProduct(product, product.ProductId, "exceeds 4096 UTF-8 bytes");
+    }
+
+    [Fact]
+    public void ProductAllowlist_ValidServerGrantMetadata_PassesDevelopmentStartup()
+    {
+        var product = CreateValidProduct();
+        product.GrantMetadata = new Dictionary<string, string>
+        {
+            ["source"] = "server-catalog"
+        };
+        var config = CreateDevelopmentConfig(product.ProductId, product);
+
+        config.ValidateForStartup();
+    }
+
+    [Fact]
+    public void ProductAllowlist_JsonStringEnumAndServerMetadata_ParseAsDocumented()
+    {
+        const string json = """
+            {
+              "products": {
+                "coins_100": {
+                  "productId": "coins_100",
+                  "type": "Consumable",
+                  "economyItemIds": ["currency_coins"],
+                  "quantity": 100,
+                  "grantMetadata": { "source": "iap" },
+                  "enabled": true
+                }
+              }
+            }
+            """;
+
+        var allowlist = MonetizationConfig.ParseProductAllowlistJson(json);
+        var product = allowlist.Products["coins_100"];
+
+        Assert.Equal(ProductType.Consumable, product.Type);
+        Assert.Equal("iap", product.GrantMetadata!["source"]);
     }
 
     [Fact]
@@ -268,6 +597,82 @@ public sealed class SecurityHardeningTests
         Assert.True(await repository.TryBeginWebhookProcessingAsync("provider-event-2"));
         await repository.AbandonWebhookProcessingAsync("provider-event-2");
         Assert.True(await repository.TryBeginWebhookProcessingAsync("provider-event-2"));
+    }
+
+    private static ProductConfig CreateValidProduct() => new()
+    {
+        ProductId = "coins_100",
+        Type = ProductType.Consumable,
+        EconomyItemIds = new List<string> { "currency_coins" },
+        Quantity = 100,
+        Enabled = true
+    };
+
+    private static MonetizationConfig CreateDevelopmentConfig(
+        string dictionaryKey,
+        ProductConfig product) =>
+        new()
+        {
+            EnvironmentName = "Development",
+            Products = new ProductAllowlistConfig
+            {
+                Products = new Dictionary<string, ProductConfig>
+                {
+                    [dictionaryKey] = product
+                }
+            }
+        };
+
+    private static MonetizationConfig CreateProductionConfig()
+    {
+        var product = CreateValidProduct();
+        return new MonetizationConfig
+        {
+            EnvironmentName = "Production",
+            StorageConnectionString =
+                "DefaultEndpointsProtocol=https;AccountName=forge;AccountKey=c2VjcmV0;EndpointSuffix=core.windows.net",
+            PlayFabTitleId = "ABCD",
+            PlayFabSecretKey = "playfab-secret",
+            Apple = new AppleStoreConfig
+            {
+                Enabled = true,
+                BundleId = "com.serhat.forge",
+                AppAppleId = 123456,
+                IssuerId = "issuer",
+                KeyId = "key",
+                PrivateKeyBase64 = "private-key",
+                TrustedRootCertificatesBase64 = "root-ca",
+                RequireAppAccountToken = true,
+                CertificateRevocationMode = "Online"
+            },
+            Google = new GoogleStoreConfig
+            {
+                Enabled = true,
+                PackageName = "com.serhat.forge",
+                ServiceAccountEmail = "service@example.test",
+                PrivateKeyBase64 = "private-key",
+                PubSubAudience = "https://example.test/webhooks/google",
+                PubSubServiceAccountEmail = "pubsub@example.test",
+                RequireObfuscatedAccountId = true
+            },
+            Products = new ProductAllowlistConfig
+            {
+                Products = new Dictionary<string, ProductConfig>
+                {
+                    [product.ProductId] = product
+                }
+            }
+        };
+    }
+
+    private static void AssertInvalidProduct(
+        ProductConfig product,
+        string dictionaryKey,
+        string expectedMessage)
+    {
+        var config = CreateDevelopmentConfig(dictionaryKey, product);
+        var exception = Assert.Throws<InvalidOperationException>(config.ValidateForStartup);
+        Assert.Contains(expectedMessage, exception.Message, StringComparison.Ordinal);
     }
 
     private static AppleJwsVerifier CreateAppleVerifier(X509Certificate2 root) =>

@@ -1,14 +1,16 @@
 using System;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
-using Serhat.Forge.CloudScript.Framework.Monetization.Domain;
 
 namespace Serhat.Forge.CloudScript.Framework.Monetization.Webhooks;
 
 /// <summary>
 /// Strict parser for Google Play RTDN Pub/Sub push envelopes.
 /// Request-level Google OIDC authentication is performed before this parser is called.
+/// RTDN notification types are retained only as change hints; they are never translated
+/// into entitlement state by this parser.
 /// </summary>
 public sealed class GoogleRtdnParser
 {
@@ -101,6 +103,14 @@ public sealed class GoogleRtdnParser
                 return GoogleRtdnResult.Failure("STALE_NOTIFICATION", "Developer event timestamp rejected");
             }
 
+            var payloadCount = CountPayloads(notification);
+            if (payloadCount != 1)
+            {
+                return GoogleRtdnResult.Failure(
+                    "INVALID_NOTIFICATION",
+                    "Exactly one developer notification payload is required");
+            }
+
             var messageId = envelope.Message.MessageId;
             if (notification.TestNotification != null)
             {
@@ -109,42 +119,79 @@ public sealed class GoogleRtdnParser
                     messageId);
             }
 
-            WebhookEvent? webhookEvent = null;
+            GoogleRtdnNotification? parsedNotification = null;
             if (notification.SubscriptionNotification != null)
             {
                 var item = notification.SubscriptionNotification;
-                if (string.IsNullOrWhiteSpace(item.PurchaseToken) ||
-                    string.IsNullOrWhiteSpace(item.SubscriptionId))
+                if (string.IsNullOrWhiteSpace(item.PurchaseToken))
                 {
-                    return GoogleRtdnResult.Failure("MISSING_PURCHASE_IDENTITY", "Subscription identity is required");
+                    return GoogleRtdnResult.Failure(
+                        "MISSING_PURCHASE_IDENTITY",
+                        "Subscription purchase token is required");
                 }
 
-                webhookEvent = MapSubscriptionNotification(notification, messageId, eventTime);
+                parsedNotification = new GoogleRtdnNotification
+                {
+                    EventId = messageId,
+                    Kind = GoogleRtdnNotificationKind.SubscriptionStateChanged,
+                    PurchaseToken = item.PurchaseToken,
+                    ProductIdHint = item.SubscriptionId,
+                    NotificationType = item.NotificationType,
+                    EventTimestampUtc = eventTime.UtcDateTime,
+                    ReceivedAtUtc = now.UtcDateTime
+                };
             }
             else if (notification.OneTimeProductNotification != null)
             {
                 var item = notification.OneTimeProductNotification;
-                if (string.IsNullOrWhiteSpace(item.PurchaseToken) || string.IsNullOrWhiteSpace(item.Sku))
+                if (string.IsNullOrWhiteSpace(item.PurchaseToken) ||
+                    string.IsNullOrWhiteSpace(item.Sku))
                 {
-                    return GoogleRtdnResult.Failure("MISSING_PURCHASE_IDENTITY", "Product identity is required");
+                    return GoogleRtdnResult.Failure(
+                        "MISSING_PURCHASE_IDENTITY",
+                        "One-time product identity is required");
                 }
 
-                webhookEvent = MapOneTimeProductNotification(notification, messageId, eventTime);
+                parsedNotification = new GoogleRtdnNotification
+                {
+                    EventId = messageId,
+                    Kind = GoogleRtdnNotificationKind.OneTimeProductChanged,
+                    PurchaseToken = item.PurchaseToken,
+                    ProductIdHint = item.Sku,
+                    NotificationType = item.NotificationType,
+                    EventTimestampUtc = eventTime.UtcDateTime,
+                    ReceivedAtUtc = now.UtcDateTime
+                };
             }
             else if (notification.VoidedPurchaseNotification != null)
             {
                 var item = notification.VoidedPurchaseNotification;
-                if (string.IsNullOrWhiteSpace(item.PurchaseToken))
+                if (string.IsNullOrWhiteSpace(item.PurchaseToken) ||
+                    !item.ProductType.HasValue ||
+                    !item.RefundType.HasValue)
                 {
-                    return GoogleRtdnResult.Failure("MISSING_PURCHASE_IDENTITY", "Voided purchase token is required");
+                    return GoogleRtdnResult.Failure(
+                        "MISSING_PURCHASE_IDENTITY",
+                        "Voided purchase identity is required");
                 }
 
-                webhookEvent = MapVoidedPurchaseNotification(notification, messageId, eventTime);
+                parsedNotification = new GoogleRtdnNotification
+                {
+                    EventId = messageId,
+                    Kind = GoogleRtdnNotificationKind.VoidedPurchase,
+                    PurchaseToken = item.PurchaseToken,
+                    ProductIdHint = item.ProductId,
+                    OrderIdHint = item.OrderId,
+                    ProductType = item.ProductType,
+                    RefundType = item.RefundType,
+                    EventTimestampUtc = eventTime.UtcDateTime,
+                    ReceivedAtUtc = now.UtcDateTime
+                };
             }
 
-            return webhookEvent == null
+            return parsedNotification == null
                 ? GoogleRtdnResult.Failure("UNKNOWN_TYPE", "Unknown notification type")
-                : GoogleRtdnResult.Success(webhookEvent, messageId);
+                : GoogleRtdnResult.Success(parsedNotification, messageId);
         }
         catch (JsonException ex)
         {
@@ -162,85 +209,40 @@ public sealed class GoogleRtdnParser
         }
     }
 
-    private WebhookEvent MapSubscriptionNotification(
-        GoogleDeveloperNotification notification,
-        string messageId,
-        DateTimeOffset eventTime)
+    private static int CountPayloads(GoogleDeveloperNotification notification)
     {
-        var item = notification.SubscriptionNotification!;
-        var result = CreateEvent(messageId, eventTime, MapSubscriptionNotificationType(item.NotificationType));
-        result.SubscriptionKey = SubscriptionRecord.CreateGoogleKey(item.PurchaseToken!);
-        result.ProductId = item.SubscriptionId;
-        result.TransactionId = item.PurchaseToken;
-        result.RawPayloadPreview = $"Type:{item.NotificationType}";
-        return result;
+        var count = 0;
+        count += notification.SubscriptionNotification == null ? 0 : 1;
+        count += notification.OneTimeProductNotification == null ? 0 : 1;
+        count += notification.VoidedPurchaseNotification == null ? 0 : 1;
+        count += notification.TestNotification == null ? 0 : 1;
+        return count;
     }
+}
 
-    private WebhookEvent MapOneTimeProductNotification(
-        GoogleDeveloperNotification notification,
-        string messageId,
-        DateTimeOffset eventTime)
-    {
-        var item = notification.OneTimeProductNotification!;
-        var result = CreateEvent(messageId, eventTime, MapOneTimeProductNotificationType(item.NotificationType));
-        result.ProductId = item.Sku;
-        result.TransactionId = item.PurchaseToken;
-        result.RawPayloadPreview = $"Type:{item.NotificationType}";
-        return result;
-    }
+public enum GoogleRtdnNotificationKind
+{
+    SubscriptionStateChanged,
+    OneTimeProductChanged,
+    VoidedPurchase
+}
 
-    private WebhookEvent MapVoidedPurchaseNotification(
-        GoogleDeveloperNotification notification,
-        string messageId,
-        DateTimeOffset eventTime)
-    {
-        var item = notification.VoidedPurchaseNotification!;
-        var eventType = item.RefundType is 1 or 2
-            ? WebhookEventType.Refunded
-            : WebhookEventType.Chargeback;
-
-        var result = CreateEvent(messageId, eventTime, eventType);
-        result.ProductId = item.ProductId ?? string.Empty;
-        result.TransactionId = item.PurchaseToken;
-        result.OriginalTransactionId = item.OrderId;
-        result.RawPayloadPreview = $"VoidedType:{item.ProductType}";
-        return result;
-    }
-
-    private WebhookEvent CreateEvent(
-        string messageId,
-        DateTimeOffset eventTime,
-        WebhookEventType eventType) => new()
-    {
-        EventId = messageId,
-        EventType = eventType,
-        Platform = Platform.Google,
-        EventTimestampUtc = eventTime.UtcDateTime,
-        ReceivedAtUtc = _timeProvider.GetUtcNow().UtcDateTime
-    };
-
-    private static WebhookEventType MapSubscriptionNotificationType(int? type) => type switch
-    {
-        1 => WebhookEventType.Recovered,
-        2 => WebhookEventType.Renewed,
-        3 => WebhookEventType.Cancelled,
-        4 => WebhookEventType.InitialPurchase,
-        5 or 6 => WebhookEventType.GracePeriodStarted,
-        7 => WebhookEventType.Resubscribed,
-        8 or 11 => WebhookEventType.UpgradeDowngrade,
-        9 or 13 => WebhookEventType.Expired,
-        10 => WebhookEventType.Paused,
-        12 => WebhookEventType.Revoked,
-        20 => WebhookEventType.GracePeriodEnded,
-        _ => WebhookEventType.Other
-    };
-
-    private static WebhookEventType MapOneTimeProductNotificationType(int? type) => type switch
-    {
-        1 => WebhookEventType.InitialPurchase,
-        2 => WebhookEventType.Cancelled,
-        _ => WebhookEventType.Other
-    };
+/// <summary>
+/// Authenticated RTDN change hint. <see cref="PurchaseToken"/> is a sensitive credential:
+/// it may be passed to Google and hashed for durable lookup, but must never be logged or stored.
+/// </summary>
+public sealed class GoogleRtdnNotification
+{
+    public string EventId { get; init; } = string.Empty;
+    public GoogleRtdnNotificationKind Kind { get; init; }
+    public string PurchaseToken { get; init; } = string.Empty;
+    public string? ProductIdHint { get; init; }
+    public string? OrderIdHint { get; init; }
+    public int? NotificationType { get; init; }
+    public int? ProductType { get; init; }
+    public int? RefundType { get; init; }
+    public DateTime EventTimestampUtc { get; init; }
+    public DateTime ReceivedAtUtc { get; init; }
 }
 
 public sealed class PubSubPushMessage
@@ -260,6 +262,7 @@ public sealed class GoogleDeveloperNotification
 {
     public string? Version { get; set; }
     public string? PackageName { get; set; }
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
     public long? EventTimeMillis { get; set; }
     public GoogleSubscriptionNotification? SubscriptionNotification { get; set; }
     public GoogleOneTimeProductNotification? OneTimeProductNotification { get; set; }
@@ -302,7 +305,7 @@ public sealed class GoogleRtdnResult
     private GoogleRtdnResult(
         bool success,
         bool isTest,
-        WebhookEvent? evt,
+        GoogleRtdnNotification? notification,
         string? messageId,
         string? testVersion,
         string? errorCode,
@@ -310,7 +313,7 @@ public sealed class GoogleRtdnResult
     {
         IsSuccess = success;
         IsTestNotification = isTest;
-        Event = evt;
+        Notification = notification;
         MessageId = messageId;
         TestVersion = testVersion;
         ErrorCode = errorCode;
@@ -319,14 +322,16 @@ public sealed class GoogleRtdnResult
 
     public bool IsSuccess { get; }
     public bool IsTestNotification { get; }
-    public WebhookEvent? Event { get; }
+    public GoogleRtdnNotification? Notification { get; }
     public string? MessageId { get; }
     public string? TestVersion { get; }
     public string? ErrorCode { get; }
     public string? ErrorMessage { get; }
 
-    public static GoogleRtdnResult Success(WebhookEvent evt, string messageId) =>
-        new(true, false, evt, messageId, null, null, null);
+    public static GoogleRtdnResult Success(
+        GoogleRtdnNotification notification,
+        string messageId) =>
+        new(true, false, notification, messageId, null, null, null);
 
     public static GoogleRtdnResult TestNotification(string version, string messageId) =>
         new(true, true, null, messageId, version, null, null);

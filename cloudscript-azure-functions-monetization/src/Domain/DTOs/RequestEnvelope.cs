@@ -37,13 +37,15 @@ public sealed class ResponseEnvelope<T> where T : class
     public T? Data { get; set; }
     public ErrorPayload? Error { get; set; }
     public long ProcessingTimeMs { get; set; }
+    public DateTime ServerUtcNow { get; set; }
 
     public static ResponseEnvelope<T> Ok(T data, string correlationId, long processingTimeMs) => new()
     {
         Success = true,
         Data = data,
         CorrelationId = correlationId,
-        ProcessingTimeMs = processingTimeMs
+        ProcessingTimeMs = processingTimeMs,
+        ServerUtcNow = DateTime.UtcNow
     };
 
     public static ResponseEnvelope<T> Fail(ErrorPayload error, string correlationId, long processingTimeMs) => new()
@@ -51,7 +53,8 @@ public sealed class ResponseEnvelope<T> where T : class
         Success = false,
         Error = error,
         CorrelationId = correlationId,
-        ProcessingTimeMs = processingTimeMs
+        ProcessingTimeMs = processingTimeMs,
+        ServerUtcNow = DateTime.UtcNow
     };
 }
 

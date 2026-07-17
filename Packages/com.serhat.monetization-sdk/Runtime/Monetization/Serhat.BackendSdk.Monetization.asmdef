@@ -2,9 +2,7 @@
     "name": "Serhat.BackendSdk.Monetization",
     "rootNamespace": "Serhat.Backend.Monetization",
     "references": [
-        "Serhat.BackendSdk.Core",
-        "Unity.Purchasing",
-        "Unity.Purchasing.Stores"
+        "Serhat.BackendSdk.Core"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
@@ -12,15 +10,7 @@
     "overrideReferences": false,
     "precompiledReferences": [],
     "autoReferenced": true,
-    "defineConstraints": [
-        "UNITY_PURCHASING"
-    ],
-    "versionDefines": [
-        {
-            "name": "com.unity.purchasing",
-            "expression": "4.0.0",
-            "define": "UNITY_PURCHASING_4_0_OR_NEWER"
-        }
-    ],
+    "defineConstraints": [],
+    "versionDefines": [],
     "noEngineReferences": false
 }

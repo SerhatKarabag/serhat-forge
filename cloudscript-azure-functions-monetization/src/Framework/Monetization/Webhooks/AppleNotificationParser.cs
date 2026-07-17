@@ -14,6 +14,11 @@ namespace Serhat.Forge.CloudScript.Framework.Monetization.Webhooks;
 /// </summary>
 public sealed class AppleNotificationParser
 {
+    private const string AutoRenewableSubscriptionType = "Auto-Renewable Subscription";
+    private const string FullRefundType = "REFUND_FULL";
+    private const string FamilyRevokeType = "FAMILY_REVOKE";
+    private const int FullRevocationPercentage = 100_000;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -42,13 +47,13 @@ public sealed class AppleNotificationParser
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _timeProvider = timeProvider ?? TimeProvider.System;
 
-        if (_config.SkipSignatureValidation && !_config.IsDevelopmentHost)
+        if (_config.Enabled && _config.SkipSignatureValidation && !_config.IsDevelopmentHost)
         {
             throw new InvalidOperationException(
                 "Apple signature validation bypass is allowed only in Development/Local/Test.");
         }
 
-        if (!_config.IsDevelopmentHost && _config.AppAppleId <= 0)
+        if (_config.Enabled && !_config.IsDevelopmentHost && _config.AppAppleId <= 0)
         {
             throw new InvalidOperationException(
                 "Apple appAppleId must be configured for a production notification parser.");
@@ -57,6 +62,11 @@ public sealed class AppleNotificationParser
 
     public AppleNotificationResult Parse(string requestBody)
     {
+        if (!_config.Enabled)
+        {
+            return AppleNotificationResult.Failure("STORE_DISABLED", "Apple Store is disabled");
+        }
+
         if (string.IsNullOrWhiteSpace(requestBody))
         {
             return AppleNotificationResult.Failure("INVALID_FORMAT", "Missing request body");
@@ -145,7 +155,15 @@ public sealed class AppleNotificationParser
             }
 
             var webhookEvent = MapToWebhookEvent(payload, transaction, renewal);
-            if (RequiresSubscriptionIdentity(webhookEvent.EventType) &&
+            if (webhookEvent.EventType is WebhookEventType.Refunded or WebhookEventType.Revoked &&
+                string.IsNullOrWhiteSpace(transaction?.TransactionId))
+            {
+                return AppleNotificationResult.Failure(
+                    "MISSING_REFUND_IDENTITY",
+                    "Refund or revocation notification has no transaction ID");
+            }
+
+            if (RequiresSubscriptionIdentity(webhookEvent) &&
                 string.IsNullOrWhiteSpace(transaction?.OriginalTransactionId))
             {
                 return AppleNotificationResult.Failure(
@@ -256,23 +274,33 @@ public sealed class AppleNotificationParser
         AppleTransactionInfo? transaction,
         AppleRenewalInfo? renewal)
     {
-        var eventType = MapNotificationType(notification.NotificationType, notification.Subtype);
+        var eventType = MapNotificationType(notification, renewal);
         var originalTransactionId = transaction?.OriginalTransactionId;
+        var isSubscription = string.Equals(
+                                 transaction?.Type,
+                                 AutoRenewableSubscriptionType,
+                                 StringComparison.Ordinal) ||
+                             IsSubscriptionLifecycleEvent(eventType);
+        var isRefundOrRevocation =
+            eventType is WebhookEventType.Refunded or WebhookEventType.Revoked;
+        var revocationTimestamp = isRefundOrRevocation
+            ? ToUtcDateTime(transaction?.RevocationDate)
+            : null;
 
         return new WebhookEvent
         {
             EventId = notification.NotificationUUID!,
             EventType = eventType,
             Platform = Platform.Apple,
-            SubscriptionKey = string.IsNullOrWhiteSpace(originalTransactionId)
+            SubscriptionKey = !isSubscription || string.IsNullOrWhiteSpace(originalTransactionId)
                 ? null
                 : SubscriptionRecord.CreateAppleKey(originalTransactionId),
             ProductId = transaction?.ProductId ?? renewal?.ProductId ?? string.Empty,
             OriginalTransactionId = originalTransactionId,
             TransactionId = transaction?.TransactionId,
-            EventTimestampUtc = notification.SignedDate.HasValue
+            EventTimestampUtc = revocationTimestamp ?? (notification.SignedDate.HasValue
                 ? DateTimeOffset.FromUnixTimeMilliseconds(notification.SignedDate.Value).UtcDateTime
-                : _timeProvider.GetUtcNow().UtcDateTime,
+                : _timeProvider.GetUtcNow().UtcDateTime),
             PeriodStartUtc = ToUtcDateTime(transaction?.PurchaseDate),
             PeriodEndUtc = ToUtcDateTime(transaction?.ExpiresDate),
             AutoRenew = renewal?.AutoRenewStatus == 1,
@@ -282,7 +310,16 @@ public sealed class AppleNotificationParser
                 notification.Data?.Environment,
                 "Sandbox",
                 StringComparison.OrdinalIgnoreCase),
-            RawPayloadPreview = $"Type:{notification.NotificationType};Subtype:{notification.Subtype}"
+            RawPayloadPreview = $"Type:{notification.NotificationType};Subtype:{notification.Subtype}",
+            IsSubscription = isSubscription,
+            RevocationType = NormalizeRevocationType(transaction?.RevocationType),
+            RevocationPercentage = NormalizeRevocationPercentage(
+                transaction?.RevocationPercentage),
+            IsFullRefund = IsFullRefundOrRevocation(transaction),
+            EntitlementOperationId = isRefundOrRevocation &&
+                                     !string.IsNullOrWhiteSpace(transaction?.TransactionId)
+                ? CreateRefundOperationId(transaction.TransactionId)
+                : null
         };
     }
 
@@ -291,8 +328,10 @@ public sealed class AppleNotificationParser
             ? DateTimeOffset.FromUnixTimeMilliseconds(unixMilliseconds.Value).UtcDateTime
             : null;
 
-    private static bool RequiresSubscriptionIdentity(WebhookEventType eventType) => eventType is
-        WebhookEventType.Renewed or
+    private static bool RequiresSubscriptionIdentity(WebhookEvent evt) =>
+        (evt.EventType is not WebhookEventType.Refunded and not WebhookEventType.Revoked ||
+         evt.IsSubscription) &&
+        evt.EventType is WebhookEventType.Renewed or
         WebhookEventType.Cancelled or
         WebhookEventType.Expired or
         WebhookEventType.Refunded or
@@ -305,22 +344,76 @@ public sealed class AppleNotificationParser
         WebhookEventType.Revoked or
         WebhookEventType.Recovered;
 
-    private static WebhookEventType MapNotificationType(string? type, string? subtype) =>
-        (type?.ToUpperInvariant(), subtype?.ToUpperInvariant()) switch
+    private static bool IsSubscriptionLifecycleEvent(WebhookEventType eventType) => eventType is
+        WebhookEventType.InitialPurchase or
+        WebhookEventType.Resubscribed or
+        WebhookEventType.Renewed or
+        WebhookEventType.Cancelled or
+        WebhookEventType.Expired or
+        WebhookEventType.GracePeriodStarted or
+        WebhookEventType.GracePeriodEnded or
+        WebhookEventType.Paused or
+        WebhookEventType.Resumed or
+        WebhookEventType.UpgradeDowngrade or
+        WebhookEventType.Recovered;
+
+    private static bool IsFullRefundOrRevocation(AppleTransactionInfo? transaction) =>
+        transaction != null &&
+        (string.Equals(transaction.RevocationType, FullRefundType, StringComparison.Ordinal) ||
+         string.Equals(transaction.RevocationType, FamilyRevokeType, StringComparison.Ordinal) ||
+         transaction.RevocationPercentage == FullRevocationPercentage);
+
+    private static string? NormalizeRevocationType(string? value) =>
+        string.IsNullOrWhiteSpace(value) || value.Length > 32
+            ? null
+            : value.ToUpperInvariant();
+
+    private static int? NormalizeRevocationPercentage(int? value) =>
+        value is >= 0 and <= FullRevocationPercentage ? value : null;
+
+    private static string CreateRefundOperationId(string transactionId)
+    {
+        var digest = System.Security.Cryptography.SHA256.HashData(
+            Encoding.UTF8.GetBytes($"apple-refund\n{transactionId}"));
+        return $"apple-refund:{Convert.ToHexString(digest)}";
+    }
+
+    private WebhookEventType MapNotificationType(
+        AppleNotificationPayload notification,
+        AppleRenewalInfo? renewal)
+    {
+        var type = notification.NotificationType?.ToUpperInvariant();
+        var subtype = notification.Subtype?.ToUpperInvariant();
+
+        // DID_FAIL_TO_RENEW is not proof that Billing Grace Period is enabled. Apple status 4,
+        // a GRACE_PERIOD subtype, and a future signed grace-period deadline must all agree
+        // before benefits are retained. Billing-retry status 3 is fail-closed and revokes.
+        if (type == "DID_FAIL_TO_RENEW")
+        {
+            var gracePeriodEnd = ToUtcDateTime(renewal?.GracePeriodExpiresDate);
+            return subtype == "GRACE_PERIOD" &&
+                   notification.Data?.Status == 4 &&
+                   gracePeriodEnd > _timeProvider.GetUtcNow().UtcDateTime
+                ? WebhookEventType.GracePeriodStarted
+                : WebhookEventType.GracePeriodEnded;
+        }
+
+        return (type, subtype) switch
         {
             ("SUBSCRIBED", "INITIAL_BUY") => WebhookEventType.InitialPurchase,
             ("SUBSCRIBED", "RESUBSCRIBE") => WebhookEventType.Resubscribed,
             ("DID_RENEW", _) => WebhookEventType.Renewed,
+            ("DID_RECOVER", _) => WebhookEventType.Recovered,
             ("DID_CHANGE_RENEWAL_STATUS", "AUTO_RENEW_DISABLED") => WebhookEventType.Cancelled,
             ("DID_CHANGE_RENEWAL_STATUS", "AUTO_RENEW_ENABLED") => WebhookEventType.Resubscribed,
             ("DID_CHANGE_RENEWAL_PREF", _) => WebhookEventType.UpgradeDowngrade,
             ("EXPIRED", _) => WebhookEventType.Expired,
             ("GRACE_PERIOD_EXPIRED", _) => WebhookEventType.GracePeriodEnded,
-            ("DID_FAIL_TO_RENEW", _) => WebhookEventType.GracePeriodStarted,
             ("REFUND", _) => WebhookEventType.Refunded,
             ("REVOKE", _) => WebhookEventType.Revoked,
             _ => WebhookEventType.Other
         };
+    }
 
     private static IAppleJwsVerifier CreateVerifier(AppleNotificationConfig config)
     {
@@ -387,6 +480,10 @@ public sealed class AppleTransactionInfo
     public string? TransactionReason { get; set; }
     public string? Storefront { get; set; }
     public string? StorefrontId { get; set; }
+    public long? RevocationDate { get; set; }
+    public int? RevocationReason { get; set; }
+    public string? RevocationType { get; set; }
+    public int? RevocationPercentage { get; set; }
 }
 
 public sealed class AppleRenewalInfo
@@ -443,6 +540,7 @@ public sealed class AppleNotificationResult
 
 public sealed class AppleNotificationConfig
 {
+    public bool Enabled { get; set; } = true;
     public string BundleId { get; set; } = string.Empty;
     public long AppAppleId { get; set; }
     public string ExpectedEnvironment { get; set; } = "Production";

@@ -1,3 +1,7 @@
+#nullable enable
+
+using System;
+
 namespace Serhat.Backend.Monetization.Domain
 {
     /// <summary>
@@ -45,6 +49,12 @@ namespace Serhat.Backend.Monetization.Domain
         /// <summary>Server internal error.</summary>
         ServerError = 12,
 
+        /// <summary>
+        /// Changing an active subscription requires a store- and backend-specific
+        /// replacement flow that is not configured by this client.
+        /// </summary>
+        SubscriptionChangeNotSupported = 13,
+
         /// <summary>Unknown error.</summary>
         Unknown = 99
     }
@@ -66,7 +76,7 @@ namespace Serhat.Backend.Monetization.Domain
             string? storeErrorCode = null)
         {
             Code = code;
-            Message = message;
+            Message = message ?? throw new ArgumentNullException(nameof(message));
             IsRetryable = isRetryable;
             StoreErrorCode = storeErrorCode;
         }
@@ -106,6 +116,14 @@ namespace Serhat.Backend.Monetization.Domain
 
         public static PurchaseError ServerError(string? message = null) =>
             new(PurchaseErrorCode.ServerError, message ?? "Server error", isRetryable: true);
+
+        public static PurchaseError SubscriptionChangeNotSupported(
+            string currentProductId,
+            string targetProductId) =>
+            new(
+                PurchaseErrorCode.SubscriptionChangeNotSupported,
+                $"Changing active subscription '{currentProductId}' to '{targetProductId}' " +
+                "requires a project-specific store replacement and backend lifecycle flow.");
 
         public static PurchaseError Unknown(string? message = null) =>
             new(PurchaseErrorCode.Unknown, message ?? "Unknown error");

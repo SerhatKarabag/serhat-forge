@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -79,6 +80,53 @@ public sealed class RevokeRequest
 }
 
 /// <summary>
+/// One PlayFab Economy v2 inventory stack.
+/// </summary>
+public sealed class InventoryItem
+{
+    public string ItemId { get; init; } = string.Empty;
+    public string StackId { get; init; } = "default";
+    public long Amount { get; init; }
+    public DateTime? ExpiresAtUtc { get; init; }
+}
+
+/// <summary>
+/// Explicit inventory query result. Provider failures must never be represented
+/// as an authoritative empty inventory.
+/// </summary>
+public sealed class InventoryQueryResult
+{
+    public bool IsSuccess { get; }
+    public IReadOnlyList<InventoryItem> Items { get; }
+    public string? ErrorCode { get; }
+    public string? ErrorMessage { get; }
+    public bool IsRetryable { get; }
+
+    private InventoryQueryResult(
+        bool isSuccess,
+        IReadOnlyList<InventoryItem>? items,
+        string? errorCode,
+        string? errorMessage,
+        bool isRetryable)
+    {
+        IsSuccess = isSuccess;
+        Items = items ?? Array.Empty<InventoryItem>();
+        ErrorCode = errorCode;
+        ErrorMessage = errorMessage;
+        IsRetryable = isRetryable;
+    }
+
+    public static InventoryQueryResult Success(IReadOnlyList<InventoryItem> items) =>
+        new(true, items, null, null, false);
+
+    public static InventoryQueryResult Failure(
+        string errorCode,
+        string errorMessage,
+        bool isRetryable) =>
+        new(false, null, errorCode, errorMessage, isRetryable);
+}
+
+/// <summary>
 /// Abstraction for granting/revoking entitlements via PlayFab Economy v2.
 /// </summary>
 public interface IEntitlementGranter
@@ -97,5 +145,7 @@ public interface IEntitlementGranter
     /// <summary>
     /// Gets current inventory items for a player.
     /// </summary>
-    Task<List<string>> GetPlayerItemsAsync(string playerId, CancellationToken ct = default);
+    Task<InventoryQueryResult> GetPlayerItemsAsync(
+        string playerId,
+        CancellationToken ct = default);
 }

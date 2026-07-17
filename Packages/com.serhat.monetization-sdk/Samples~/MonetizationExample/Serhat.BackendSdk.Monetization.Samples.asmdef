@@ -1,0 +1,19 @@
+{
+    "name": "Serhat.BackendSdk.Monetization.Samples",
+    "rootNamespace": "Serhat.Backend.Monetization.Samples",
+    "references": [
+        "Serhat.BackendSdk.Monetization",
+        "Serhat.BackendSdk.Monetization.UnityIap",
+        "Serhat.BackendSdk.Core",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

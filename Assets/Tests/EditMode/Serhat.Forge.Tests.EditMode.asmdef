@@ -2,7 +2,9 @@
   "name": "Serhat.Forge.Tests.EditMode",
   "rootNamespace": "Serhat.Forge.Tests.EditMode",
   "references": [
-    "Zenject"
+    "Zenject",
+    "Serhat.BackendSdk.Core",
+    "Serhat.BackendSdk.Monetization"
   ],
   "includePlatforms": [
     "Editor"

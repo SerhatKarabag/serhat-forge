@@ -1,0 +1,63 @@
+name: Usage question
+description: Ask for help using or configuring the reusable template.
+title: "[Question]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check README.md, docs/GETTING_STARTED.md, docs/INTEGRATIONS.md, and docs/TROUBLESHOOTING.md first. Do not include credentials, player data, store receipts, session tokens, or signing material.
+  - type: input
+    id: version
+    attributes:
+      label: Serhat Forge version or commit
+      placeholder: 0.1.0-preview.1 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: unity
+    attributes:
+      label: Unity version
+      placeholder: 6000.3.14f1
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Getting started / project setup
+        - Zenject / startup
+        - Addressables / content
+        - Persistence
+        - Localization
+        - Analytics
+        - Backend / cloud sample
+        - Monetization
+        - Optional integration
+        - CI / builds
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to achieve?
+      description: Describe the intended outcome and the documentation you already followed.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Relevant configuration and sanitized output
+      description: Include enabled symbols, provider versions, and the first relevant warning/error. Remove all sensitive data.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I checked the getting-started, integration, and troubleshooting guides.
+          required: true
+        - label: I removed secrets and personal/player data.
+          required: true
+        - label: This is not a security vulnerability; those are reported privately through SECURITY.md.
+          required: true

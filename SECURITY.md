@@ -11,7 +11,9 @@
 
 Do not disclose vulnerabilities in public issues, discussions, pull requests, logs, or sample configuration files.
 
-Use the repository's GitHub private vulnerability reporting flow: **Security > Advisories > Report a vulnerability**. If that option is not available, contact the maintainer privately through the verified contact method on the repository owner's GitHub profile and include only enough information to establish a secure follow-up channel.
+For a public Serhat Forge repository, use GitHub private vulnerability reporting: **Security > Advisories > Report a vulnerability**. GitHub exposes this setting only after the repository is public, so complete the code and documentation gates while private; then make the repository public, immediately enable private vulnerability reporting in the repository's code-security settings, and verify that the **Report a vulnerability** button is available before announcing or sharing the release.
+
+While the repository is private, coordinate only through an already authorized private collaborator channel. If no private channel is available, do not publish exploit details, credentials, or player data; wait until the maintainer provides a secure reporting path.
 
 Include the affected version/commit, platform, impact, reproduction steps, and any suggested mitigation. Do not include real production credentials or user data.
 

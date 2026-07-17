@@ -19,6 +19,42 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Serhat.Forge.CloudScript.csproj" />
-    <ProjectReference Include="..\..\..\cloudscript-azure-functions-monetization\Serhat.Forge.Monetization.CloudScript.csproj" />
+    <ProjectReference Include="..\..\..\cloudscript-azure-functions-monetization\Serhat.Forge.Monetization.CloudScript.csproj">
+      <Aliases>global,MonetizationCloud</Aliases>
+    </ProjectReference>
+  </ItemGroup>
+
+  <!--
+    Compile the Unity-free transport and monetization client contracts into this test
+    assembly. This keeps the shipped UPM client and Azure Function contract under the
+    same fast .NET test gate without requiring a Unity editor on CI.
+  -->
+  <ItemGroup>
+    <Compile Include="..\..\..\Packages\com.serhat.backend-sdk\Runtime\Core\CloudResult.cs"
+             Link="ClientContracts\Backend\CloudResult.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.backend-sdk\Runtime\Core\Interfaces.cs"
+             Link="ClientContracts\Backend\Interfaces.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.monetization-sdk\Runtime\Monetization\Backend\IMonetizationBackendClient.cs"
+             Link="ClientContracts\Monetization\IMonetizationBackendClient.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.monetization-sdk\Runtime\Monetization\Backend\MonetizationBackendClient.cs"
+             Link="ClientContracts\Monetization\MonetizationBackendClient.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.monetization-sdk\Runtime\Monetization\Backend\MonetizationDTOs.cs"
+             Link="ClientContracts\Monetization\MonetizationDTOs.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.monetization-sdk\Runtime\Monetization\Domain\EntitlementDto.cs"
+             Link="ClientContracts\Monetization\EntitlementDto.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.monetization-sdk\Runtime\Monetization\Domain\ProductDefinition.cs"
+             Link="ClientContracts\Monetization\ProductDefinition.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.monetization-sdk\Runtime\Monetization\Domain\PurchaseError.cs"
+             Link="ClientContracts\Monetization\PurchaseError.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.monetization-sdk\Runtime\Monetization\Domain\PurchaseResult.cs"
+             Link="ClientContracts\Monetization\PurchaseResult.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.monetization-sdk\Runtime\Monetization\Domain\StoreOperationResult.cs"
+             Link="ClientContracts\Monetization\StoreOperationResult.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.monetization-sdk\Runtime\Monetization\Domain\StoreAccountIdentity.cs"
+             Link="ClientContracts\Monetization\StoreAccountIdentity.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.monetization-sdk\Runtime\Monetization\Domain\SubscriptionDto.cs"
+             Link="ClientContracts\Monetization\SubscriptionDto.cs" />
+    <Compile Include="..\..\..\Packages\com.serhat.monetization-sdk\Runtime\Monetization\Persistence\PendingPurchaseStore.cs"
+             Link="ClientContracts\Monetization\PendingPurchaseStore.cs" />
   </ItemGroup>
 </Project>

@@ -1,10 +1,13 @@
+#nullable enable
+
 using Serhat.Backend.Monetization.Domain;
 
 namespace Serhat.Backend.Monetization.Abstractions
 {
     /// <summary>
-    /// Defines tier precedence and upgrade/downgrade policy for subscriptions.
-    /// Implement this interface to define your game's subscription tier rules.
+    /// Defines tier precedence and intended upgrade/downgrade policy for subscriptions.
+    /// The base purchase service fails closed for active-subscription replacement; games that
+    /// implement the complete store/backend replacement lifecycle can reuse this policy there.
     /// </summary>
     public interface ITierPolicy
     {
@@ -24,13 +27,13 @@ namespace Serhat.Backend.Monetization.Abstractions
         TierChangeResult CompareTiers(string? fromTierKey, string toTierKey);
 
         /// <summary>
-        /// Gets the policy for upgrades.
+        /// Gets the intended policy for a project-specific upgrade implementation.
         /// Default: Immediate (user gets benefits right away).
         /// </summary>
         TierChangePolicy UpgradePolicy { get; }
 
         /// <summary>
-        /// Gets the policy for downgrades.
+        /// Gets the intended policy for a project-specific downgrade implementation.
         /// Default: NextRenewal (user keeps current tier until period ends).
         /// </summary>
         TierChangePolicy DowngradePolicy { get; }

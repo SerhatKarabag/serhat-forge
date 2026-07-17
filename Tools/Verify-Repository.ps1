@@ -35,6 +35,7 @@ function Get-PublishableFiles {
         'Samples~',
         'cloudscript-azure-functions-monetization',
         '.github',
+        'docs',
         'Tools'
     )
 
@@ -59,6 +60,7 @@ function Get-PublishableFiles {
 
     foreach ($relativePath in @(
         'README.md',
+        'README.tr.md',
         'TEMPLATE_README.md',
         'LICENSE',
         'CHANGELOG.md',
@@ -82,6 +84,7 @@ Write-Host "Root: $root"
 
 $requiredFiles = @(
     'README.md',
+    'README.tr.md',
     'LICENSE',
     'CHANGELOG.md',
     'CONTRIBUTING.md',
@@ -99,7 +102,16 @@ $requiredFiles = @(
     'Assets/Tests/EditMode/CompositionAssetTests.cs',
     'Assets/Tests/PlayMode/Serhat.Forge.Tests.PlayMode.asmdef',
     'Assets/Tests/PlayMode/CompositionPlayModeTests.cs',
-    '.github/workflows/cloud-tests.yml'
+    '.github/workflows/cloud-tests.yml',
+    '.github/ISSUE_TEMPLATE/question.yml',
+    'docs/GETTING_STARTED.md',
+    'docs/FEATURES.md',
+    'docs/ARCHITECTURE.md',
+    'docs/CORE_SYSTEMS.md',
+    'docs/INTEGRATIONS.md',
+    'docs/CI_AND_RELEASE.md',
+    'docs/TROUBLESHOOTING.md',
+    'docs/UPGRADING.md'
 )
 
 foreach ($relativePath in $requiredFiles) {
@@ -123,8 +135,14 @@ foreach ($file in $publishableFiles) {
 $projectSettingsPath = Join-Path $root 'ProjectSettings/ProjectSettings.asset'
 if (Test-Path -LiteralPath $projectSettingsPath) {
     $settings = [IO.File]::ReadAllText($projectSettingsPath)
-    if ($settings -match '(?m)^[ \t]*ps4Passcode:[ \t]*\S+[ \t]*$') {
-        Add-Issue 'ProjectSettings contains a non-empty PS4 passcode.'
+    $unityDefaultPs4Passcode = 'frAQBc8Wsa1xVPfvJcrgRYwTiizs2trQ'
+    $ps4PasscodeMatch = [regex]::Match(
+        $settings,
+        '(?m)^[ \t]*ps4Passcode:[ \t]*(?<value>\S*)[ \t]*$')
+    if ($ps4PasscodeMatch.Success -and
+        -not [string]::IsNullOrWhiteSpace($ps4PasscodeMatch.Groups['value'].Value) -and
+        $ps4PasscodeMatch.Groups['value'].Value -ne $unityDefaultPs4Passcode) {
+        Add-Issue 'ProjectSettings contains a custom PS4 passcode instead of the public Unity placeholder.'
     }
 
     foreach ($field in @('switchApplicationID', 'ps4ContentID')) {
@@ -133,8 +151,8 @@ if (Test-Path -LiteralPath $projectSettingsPath) {
         }
     }
 
-    if ($settings -match '(?m)^[ \t]*scriptingDefineSymbols:.*\bUNITY_PURCHASING\b') {
-        Add-Issue 'UNITY_PURCHASING must remain an explicit opt-in in the public template.'
+    if ($settings -match '\bUNITY_PURCHASING\b') {
+        Add-Issue 'UNITY_PURCHASING is obsolete; Unity IAP is package-owned and must not be gated by a Player Settings symbol.'
     }
 
     if ($settings -match '(?ms)^[ \t]*cloudServicesEnabled:[ \t]*\r?\n[ \t]+Purchasing:[ \t]*1[ \t]*$') {
@@ -200,6 +218,48 @@ foreach ($entry in $textCache.GetEnumerator()) {
     foreach ($secretPattern in $secretPatterns.GetEnumerator()) {
         if ($entry.Value -match $secretPattern.Value) {
             Add-Issue "$($secretPattern.Key) detected in $($entry.Key.Substring($root.Length + 1))."
+        }
+    }
+}
+
+$markdownFiles = $publishableFiles | Where-Object { $_.Extension -eq '.md' }
+foreach ($file in $markdownFiles) {
+    $markdown = $textCache[$file.FullName]
+    $linkMatches = [regex]::Matches(
+        $markdown,
+        '(?m)!?\[[^\]]*\]\((?<target>[^)]+)\)')
+    foreach ($linkMatch in $linkMatches) {
+        $target = $linkMatch.Groups['target'].Value.Trim()
+        if ([string]::IsNullOrWhiteSpace($target) -or
+            $target.StartsWith('#', [StringComparison]::Ordinal) -or
+            $target -match '^(?i:https?|mailto):') {
+            continue
+        }
+
+        if ($target.StartsWith('<', [StringComparison]::Ordinal) -and
+            $target.EndsWith('>', [StringComparison]::Ordinal)) {
+            $target = $target.Substring(1, $target.Length - 2)
+        }
+
+        $fragmentIndex = $target.IndexOf('#')
+        if ($fragmentIndex -ge 0) {
+            $target = $target.Substring(0, $fragmentIndex)
+        }
+
+        if ([string]::IsNullOrWhiteSpace($target)) {
+            continue
+        }
+
+        try {
+            $decodedTarget = [Uri]::UnescapeDataString($target)
+            $resolvedTarget = [IO.Path]::GetFullPath(
+                (Join-Path $file.DirectoryName $decodedTarget))
+            if (-not (Test-Path -LiteralPath $resolvedTarget)) {
+                Add-Issue "Broken relative Markdown link in $($file.FullName.Substring($root.Length + 1)): $target"
+            }
+        }
+        catch {
+            Add-Issue "Invalid relative Markdown link in $($file.FullName.Substring($root.Length + 1)): $target"
         }
     }
 }
@@ -297,7 +357,7 @@ foreach ($file in $firstPartyCode) {
 $embeddedPackagesRoot = Join-Path $root 'Packages'
 Get-ChildItem -LiteralPath $embeddedPackagesRoot -Directory -Filter 'com.serhat.*' -ErrorAction Stop |
     ForEach-Object {
-        foreach ($requiredPackageFile in @('package.json', 'LICENSE.md')) {
+        foreach ($requiredPackageFile in @('package.json', 'README.md', 'CHANGELOG.md', 'LICENSE.md')) {
             if (-not (Test-Path -LiteralPath (Join-Path $_.FullName $requiredPackageFile))) {
                 Add-Issue "Embedded package $($_.Name) is missing $requiredPackageFile."
             }

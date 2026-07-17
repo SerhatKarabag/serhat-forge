@@ -61,7 +61,8 @@
       "source": "embedded",
       "dependencies": {
         "com.serhat.backend-sdk": "2.1.0-preview.1",
-        "com.unity.purchasing": "5.2.0"
+        "com.unity.purchasing": "5.2.0",
+        "com.unity.ugui": "2.0.0"
       }
     },
     "com.unity.2d.sprite": {

@@ -1,92 +1,164 @@
 # Serhat Localization SDK
 
-A preview, project-agnostic localization package for Unity with runtime language switching, fallback chains, pluralization, formatting, and TextMeshPro integration.
+Project-agnostic localization for Unity with runtime locale switching, fallback chains, plural rules, culture-aware formatting, CSV import, and TextMeshPro integration.
 
-## Features
+## Capabilities
 
-- **Runtime Language Switching**: Change languages instantly at runtime
-- **Fallback Chain**: en-US -> en -> default locale -> key
-- **Pluralization**: Support for English, Turkish, and Russian plural rules
-- **Formatting**: Culture-aware number and date formatting
-- **TextMeshPro Integration**: Automatic text updates on locale change
-- **Multiple Providers**: StreamingAssets and Resources support
-- **Editor Tools**: CSV import with validation
-- **IL2CPP Safe**: No heavy reflection, mobile-ready
+- Runtime locale switching with a persisted player preference
+- Region-to-language-to-default fallback (`en-US` -> `en` -> configured default)
+- English, Turkish, and Russian plural rules
+- JSON string tables generated from CSV
+- `StreamingAssets` and `Resources` providers
+- `LocalizedTMPText` updates when the locale changes
+- Android/WebGL-compatible `StreamingAssets` loading
 
-## Installation
+## Required startup sequence
 
-The SDK is already installed in the Packages folder.
+Localization does not bootstrap itself. Call and await `Loc.InitializeAsync` once before reading strings or displaying localized components. The `Auto Initialize` field on the settings asset is configuration data; it does not replace this explicit startup call in the current preview.
 
-## Quick Start
+```csharp
+using System;
+using Serhat.Localization;
+using UnityEngine;
 
-### 1. Create Settings Asset
-**Tools > Serhat > Localization > Create Settings**
+public sealed class LocalizationBootstrap : MonoBehaviour
+{
+    public bool IsReady { get; private set; }
 
-This creates a `LocalizationSettings` asset in `Assets/Resources/`.
+    private async void Awake()
+    {
+        try
+        {
+            await Loc.InitializeAsync();
+            IsReady = true;
+        }
+        catch (Exception exception)
+        {
+            Debug.LogException(exception);
+            enabled = false;
+        }
+    }
+}
+```
 
-### 2. Configure Settings
-- Set **Default Locale** (e.g., "en")
-- Add **Supported Locales** (e.g., "en", "tr")
-- Choose **Provider Type** (StreamingAssets or Resources)
+Keep gameplay/UI startup behind this initialization step so the first frame never renders localization keys.
 
-### 3. Prepare Localization Data
+## Setup
 
-#### CSV Format
+### 1. Create settings
+
+In Unity, select **Tools > Serhat > Localization > Create Settings**. This creates:
+
+```text
+Assets/Resources/LocalizationSettings.asset
+```
+
+Configure:
+
+- **Default Locale**: for example `en`
+- **Supported Locales**: for example `en`, `tr`, `en-US`
+- **Use System Language**: uses the closest supported locale on first launch
+- **Provider Type** and **Data Path**
+
+Provider locations for the default `Localization/Locales` data path are:
+
+| Provider | Expected files |
+|---|---|
+| `StreamingAssets` | `Assets/StreamingAssets/Localization/Locales/en.json` |
+| `Resources` | `Assets/Resources/Localization/Locales/en.json` |
+
+Do not include `.json` in the configured data path.
+
+### 2. Prepare CSV
+
 ```csv
 key,en,tr
 ui.play,Play,Oyna
-ui.settings,Settings,Ayarlar
+welcome.message,Hello {0}!,Merhaba {0}!
 items.count.one,{0} item,{0} oge
 items.count.other,{0} items,{0} oge
 ```
 
-### 4. Import Data
-**Tools > Serhat > Localization > Import CSV**
+Rules:
 
-### 5. Use in Code
-```csharp
-using Serhat.Localization;
+- The first column is `key`; remaining headers are locale codes.
+- Plural rows use `.zero`, `.one`, `.two`, `.few`, `.many`, or `.other` suffixes.
+- Lines beginning with `#` and empty lines are ignored.
+- Quote CSV values that contain commas; escape a quote as `""`.
+- Include the configured default locale column or import fails.
 
-// Simple get
-string text = Loc.Get("ui.play");
+### 3. Generate JSON
 
-// With formatting
-string formatted = Loc.Format("welcome.message", playerName);
+Select **Tools > Serhat > Localization > Import CSV** and choose the CSV. The importer writes one JSON file per locale to the provider/data path configured above.
 
-// Pluralization
-string items = Loc.Plural("items.count", itemCount, itemCount);
+Commit the generated JSON files. Validate every supported locale in a player build; `StreamingAssets` access differs by platform.
 
-// Change locale
-await Loc.SetLocaleAsync("tr");
+Generated files use simple values and nested plural forms:
 
-// Listen for changes
-Loc.OnLocaleChanged += (sender, args) => UpdateUI();
-```
-
-### 6. Use with TextMeshPro
-Add `LocalizedTMPText` component to your TextMeshPro objects:
-- Set the **Key** field
-- Optionally enable **Use Plural Count** for pluralization
-
-## Data Schema
-
-### CSV Format
-- First column: `key`
-- Additional columns: locale codes (e.g., `en`, `tr`)
-- Plural keys use suffixes: `key.one`, `key.other`, `key.few`, `key.many`
-- Comments start with `#`
-- Empty lines are ignored
-
-### JSON Format
 ```json
 {
-  "simple.key": "Simple value",
-  "plural.key": {
-    "one": "One item",
+  "ui.play": "Play",
+  "welcome.message": "Hello {0}!",
+  "items.count": {
+    "one": "{0} item",
     "other": "{0} items"
   }
 }
 ```
+
+## Runtime usage
+
+Only call these APIs after initialization:
+
+```csharp
+string playLabel = Loc.Get("ui.play");
+string greeting = Loc.Format("welcome.message", playerName);
+string itemLabel = Loc.Plural("items.count", itemCount, itemCount);
+
+await Loc.SetLocaleAsync("tr");
+```
+
+Prefer `SetLocaleAsync` and await it. `SetLocale` starts the asynchronous load without exposing completion, so it is unsuitable when the next UI operation depends on the new table.
+
+Subscribe and unsubscribe with the same owner:
+
+```csharp
+private void OnEnable()
+{
+    Loc.OnLocaleChanged += HandleLocaleChanged;
+}
+
+private void OnDisable()
+{
+    Loc.OnLocaleChanged -= HandleLocaleChanged;
+}
+
+private void HandleLocaleChanged(object sender, LocaleChangedEventArgs args)
+{
+    RefreshView();
+}
+```
+
+## TextMeshPro
+
+Add `LocalizedTMPText` to an object with a `TMP_Text` component, then set its key. For plural text, enable plural count and update `PluralCount` at runtime.
+
+The component intentionally does nothing before `Loc.IsInitialized`. Initialize localization before enabling the first localized scene, or call `UpdateText` after your startup gate opens.
+
+## Fallback and missing keys
+
+For `en-US`, resolution is:
+
+1. `en-US`
+2. `en`, when it is supported
+3. configured default locale
+4. the key itself, with a missing-key warning
+
+Keep the default locale complete and treat missing-key warnings as content validation failures in development builds.
+
+## Sample
+
+Import **Basic Usage** from Package Manager and follow its included `README.md`. The sample CSV must still be imported into your configured provider path before running the sample scene/UI.
 
 ## Requirements
 

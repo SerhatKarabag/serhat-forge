@@ -19,9 +19,17 @@ namespace Serhat.Forge.Backend
     ///
     /// <para>Usage:</para>
     /// <code>
-    /// // Wire from your bootstrapper after auth completes:
-    /// var client = await BackendManager.Instance.InitializeAsync(playFabSessionTicket);
-    /// var result = await client.InvokeAsync&lt;MyRequest, MyResponse&gt;("MyFunction", request, ct);
+    /// async Task LoadBackendAsync(CancellationToken cancellationToken)
+    /// {
+    ///     var manager = BackendManager.Instance
+    ///         ?? throw new InvalidOperationException("BackendManager is not present in the scene.");
+    ///
+    ///     var client = await manager.InitializeAsync(cancellationToken);
+    ///     var result = await client.GetBootstrapAsync(cancellationToken);
+    ///     result.Match(
+    ///         bootstrap => Debug.Log($"Player: {bootstrap.Progress.PlayerId}"),
+    ///         error => Debug.LogError(error));
+    /// }
     /// </code>
     /// </summary>
     public sealed class BackendManager : MonoBehaviour
@@ -70,6 +78,8 @@ namespace Serhat.Forge.Backend
 
             _initCts?.Cancel();
             _initCts?.Dispose();
+            Client?.Dispose();
+            Client = null;
         }
 
         public void SetTitleId(string titleId) => _titleId = titleId ?? string.Empty;
@@ -97,7 +107,7 @@ namespace Serhat.Forge.Backend
             try
             {
                 var serializer = new PlayFabSimpleJsonSerializer();
-                var clock = ServerClock.Instance;
+                var clock = SystemClock.Instance;
                 var logger = new UnityBackendLogger("BackendManager");
 
                 var invokerOptions = new BackendSdkOptions

@@ -16,7 +16,6 @@ namespace Serhat.Forge.Editor
     {
         private const string SampleScenePath = "Assets/Scenes/SampleScene.unity";
         private const string MenuPath = "Tools/Serhat Forge/Setup/Project Settings";
-        private const string UnityPurchasingDefine = "UNITY_PURCHASING";
 
         private static readonly Regex BundleIdentifierPattern = new(
             @"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){2,}$",
@@ -33,7 +32,6 @@ namespace Serhat.Forge.Editor
         [SerializeField] private string _iosBuildNumber = "1";
         [SerializeField] private bool _configureTemplateScenes = true;
         [SerializeField] private bool _configureMobileIl2Cpp = true;
-        [SerializeField] private bool _enableUnityIap;
 
         private Vector2 _scroll;
 
@@ -76,15 +74,6 @@ namespace Serhat.Forge.Editor
             _configureMobileIl2Cpp = EditorGUILayout.ToggleLeft(
                 "Configure Android and iOS for IL2CPP",
                 _configureMobileIl2Cpp);
-
-            EditorGUILayout.Space(8f);
-            EditorGUILayout.LabelField("Optional Integrations", EditorStyles.boldLabel);
-            _enableUnityIap = EditorGUILayout.ToggleLeft(
-                "Enable Unity IAP client code (UNITY_PURCHASING)",
-                _enableUnityIap);
-            EditorGUILayout.HelpBox(
-                "Enabling the client does not verify purchases. Before shipping, connect it to the hardened cloud backend and configure store credentials outside the repository.",
-                MessageType.Warning);
 
             EditorGUILayout.Space(12f);
             DrawValidation();
@@ -188,9 +177,6 @@ namespace Serhat.Forge.Editor
             _iosBuildNumber = string.IsNullOrWhiteSpace(PlayerSettings.iOS.buildNumber)
                 ? "1"
                 : PlayerSettings.iOS.buildNumber;
-            _enableUnityIap = HasScriptingDefine(NamedBuildTarget.Android, UnityPurchasingDefine) ||
-                              HasScriptingDefine(NamedBuildTarget.iOS, UnityPurchasingDefine) ||
-                              HasScriptingDefine(NamedBuildTarget.Standalone, UnityPurchasingDefine);
         }
 
         private void ApplyProjectSetup()
@@ -223,10 +209,6 @@ namespace Serhat.Forge.Editor
                 PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.iOS, normalizedBundleId);
                 PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Standalone, normalizedBundleId);
 
-                SetScriptingDefine(NamedBuildTarget.Android, UnityPurchasingDefine, _enableUnityIap);
-                SetScriptingDefine(NamedBuildTarget.iOS, UnityPurchasingDefine, _enableUnityIap);
-                SetScriptingDefine(NamedBuildTarget.Standalone, UnityPurchasingDefine, _enableUnityIap);
-
                 if (_configureMobileIl2Cpp)
                 {
                     PlayerSettings.SetScriptingBackend(NamedBuildTarget.Android, ScriptingImplementation.IL2CPP);
@@ -242,8 +224,7 @@ namespace Serhat.Forge.Editor
 
                 Debug.Log(
                     $"[Serhat Forge] Project setup applied: company='{PlayerSettings.companyName}', " +
-                    $"product='{PlayerSettings.productName}', bundle='{normalizedBundleId}', " +
-                    $"unityIap={_enableUnityIap}.");
+                    $"product='{PlayerSettings.productName}', bundle='{normalizedBundleId}'.");
 
                 EditorUtility.DisplayDialog(
                     "Serhat Forge setup complete",
@@ -283,33 +264,5 @@ namespace Serhat.Forge.Editor
             return AssetDatabase.LoadAssetAtPath<SceneAsset>(path) != null;
         }
 
-        private static bool HasScriptingDefine(NamedBuildTarget target, string define)
-        {
-            return PlayerSettings.GetScriptingDefineSymbols(target)
-                .Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
-                .Any(symbol => string.Equals(symbol.Trim(), define, StringComparison.Ordinal));
-        }
-
-        private static void SetScriptingDefine(
-            NamedBuildTarget target,
-            string define,
-            bool enabled)
-        {
-            var symbols = new HashSet<string>(
-                PlayerSettings.GetScriptingDefineSymbols(target)
-                    .Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(symbol => symbol.Trim())
-                    .Where(symbol => !string.IsNullOrWhiteSpace(symbol)),
-                StringComparer.Ordinal);
-
-            if (enabled)
-                symbols.Add(define);
-            else
-                symbols.Remove(define);
-
-            PlayerSettings.SetScriptingDefineSymbols(
-                target,
-                string.Join(";", symbols.OrderBy(symbol => symbol, StringComparer.Ordinal)));
-        }
     }
 }

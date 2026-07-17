@@ -1,3 +1,5 @@
+#nullable enable
+
 using System.Collections.Generic;
 using Serhat.Backend.Monetization.Abstractions;
 using Serhat.Backend.Monetization.Domain;

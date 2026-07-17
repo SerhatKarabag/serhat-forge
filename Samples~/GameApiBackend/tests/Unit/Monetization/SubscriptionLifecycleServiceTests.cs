@@ -34,7 +34,11 @@ public class SubscriptionLifecycleServiceTests
                 {
                     ProductId = "premium_monthly",
                     Type = ProductType.Subscription,
-                    EconomyItemIds = new List<string> { "subscription_premium" },
+                    EconomyItemIds = new List<string>
+                    {
+                        "subscription_premium",
+                        "subscriber_badge"
+                    },
                     TierKey = "premium",
                     TierPrecedence = 1,
                     Enabled = true
@@ -43,7 +47,11 @@ public class SubscriptionLifecycleServiceTests
                 {
                     ProductId = "pro_monthly",
                     Type = ProductType.Subscription,
-                    EconomyItemIds = new List<string> { "subscription_pro" },
+                    EconomyItemIds = new List<string>
+                    {
+                        "subscription_pro",
+                        "pro_badge"
+                    },
                     TierKey = "pro",
                     TierPrecedence = 2,
                     Enabled = true
@@ -308,7 +316,10 @@ public class SubscriptionLifecycleServiceTests
     public async Task ProcessWebhookEventAsync_TierUpgrade_AppliesImmediately()
     {
         // Arrange
-        await CreateTestSubscription();
+        var existingSubscription = await CreateTestSubscription();
+        existingSubscription.SetActiveEconomyItemIds(
+            new[] { "subscription_premium", "subscriber_badge" });
+        Assert.True(await _repository.UpdateSubscriptionAsync(existingSubscription));
 
         _granterMock
             .Setup(g => g.RevokeItemsAsync(It.IsAny<RevokeRequest>(), It.IsAny<CancellationToken>()))
@@ -316,7 +327,8 @@ public class SubscriptionLifecycleServiceTests
 
         _granterMock
             .Setup(g => g.GrantItemsAsync(It.IsAny<GrantRequest>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(GrantResult.Success(new List<string> { "subscription_pro" }));
+            .ReturnsAsync(GrantResult.Success(
+                new List<string> { "subscription_pro", "pro_badge" }));
 
         var webhookEvent = new WebhookEvent
         {
@@ -342,8 +354,25 @@ public class SubscriptionLifecycleServiceTests
         Assert.Equal(2, subscription.TierPrecedence);
 
         // Verify old entitlement revoked and new granted
-        _granterMock.Verify(g => g.RevokeItemsAsync(It.IsAny<RevokeRequest>(), It.IsAny<CancellationToken>()), Times.Once);
-        _granterMock.Verify(g => g.GrantItemsAsync(It.IsAny<GrantRequest>(), It.IsAny<CancellationToken>()), Times.Once);
+        _granterMock.Verify(
+            g => g.RevokeItemsAsync(
+                It.Is<RevokeRequest>(request =>
+                    request.ItemIds.Count == 2 &&
+                    request.ItemIds.Contains("subscription_premium") &&
+                    request.ItemIds.Contains("subscriber_badge")),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+        _granterMock.Verify(
+            g => g.GrantItemsAsync(
+                It.Is<GrantRequest>(request =>
+                    request.ItemIds.Count == 2 &&
+                    request.ItemIds.Contains("subscription_pro") &&
+                    request.ItemIds.Contains("pro_badge")),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+        Assert.Equal(
+            new[] { "subscription_pro", "pro_badge" },
+            subscription.ActiveEconomyItemIds);
     }
 
     [Fact]
@@ -395,5 +424,326 @@ public class SubscriptionLifecycleServiceTests
         // Verify no entitlement changes (downgrade is deferred)
         _granterMock.Verify(g => g.RevokeItemsAsync(It.IsAny<RevokeRequest>(), It.IsAny<CancellationToken>()), Times.Never);
         _granterMock.Verify(g => g.GrantItemsAsync(It.IsAny<GrantRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ProcessWebhookEventAsync_Expiration_RevokesEverySnapshottedItem()
+    {
+        var subscription = new SubscriptionRecord
+        {
+            SubscriptionKey = "apple:bundle_subscription",
+            Platform = Platform.Apple,
+            PlayerId = "player123",
+            ProductId = "premium_monthly",
+            TierKey = "premium",
+            TierPrecedence = 1,
+            Status = SubscriptionStatus.Active,
+            AutoRenew = true,
+            PeriodStartUtc = DateTime.UtcNow.AddDays(-30),
+            PeriodEndUtc = DateTime.UtcNow.AddDays(1),
+            LastEventAtUtc = DateTime.UtcNow,
+            CreatedAtUtc = DateTime.UtcNow.AddDays(-30),
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+        subscription.SetActiveEconomyItemIds(
+            new[] { "subscription_premium", "subscriber_badge" });
+        await _repository.CreateSubscriptionAsync(subscription);
+
+        RevokeRequest? capturedRequest = null;
+        _granterMock
+            .Setup(g => g.RevokeItemsAsync(It.IsAny<RevokeRequest>(), It.IsAny<CancellationToken>()))
+            .Callback<RevokeRequest, CancellationToken>((request, _) => capturedRequest = request)
+            .ReturnsAsync(GrantResult.Success(
+                new List<string> { "subscription_premium", "subscriber_badge" }));
+
+        var result = await _service.ProcessWebhookEventAsync(new WebhookEvent
+        {
+            EventId = "event_bundle_expired",
+            EventType = WebhookEventType.Expired,
+            Platform = Platform.Apple,
+            SubscriptionKey = subscription.SubscriptionKey,
+            EventTimestampUtc = subscription.LastEventAtUtc.AddMinutes(1),
+            ReceivedAtUtc = DateTime.UtcNow
+        });
+
+        Assert.True(result.IsSuccess);
+        Assert.NotNull(capturedRequest);
+        Assert.Equal(
+            new[] { "subscription_premium", "subscriber_badge" },
+            capturedRequest.ItemIds);
+
+        var stored = await _repository.GetSubscriptionAsync(subscription.SubscriptionKey);
+        Assert.NotNull(stored);
+        Assert.Equal(SubscriptionStatus.Expired, stored.Status);
+        Assert.Empty(stored.ActiveEconomyItemIds);
+        Assert.Null(stored.ActiveEconomyItemId);
+    }
+
+    [Fact]
+    public async Task ProcessWebhookEventAsync_RevokeFailure_DoesNotCommitAndCanRetry()
+    {
+        var subscription = await CreateTestSubscription();
+        var idempotencyKeys = new List<string>();
+        var attempt = 0;
+        _granterMock
+            .Setup(g => g.RevokeItemsAsync(It.IsAny<RevokeRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((RevokeRequest request, CancellationToken _) =>
+            {
+                idempotencyKeys.Add(request.IdempotencyKey);
+                attempt++;
+                return attempt == 1
+                    ? GrantResult.Failure("TEMPORARY", "Provider unavailable")
+                    : GrantResult.Success(new List<string>(request.ItemIds));
+            });
+
+        var webhookEvent = new WebhookEvent
+        {
+            EventId = "event_retryable_expiration",
+            EventType = WebhookEventType.Expired,
+            Platform = Platform.Apple,
+            SubscriptionKey = subscription.SubscriptionKey,
+            EventTimestampUtc = subscription.LastEventAtUtc.AddMinutes(1),
+            ReceivedAtUtc = DateTime.UtcNow
+        };
+
+        var firstResult = await _service.ProcessWebhookEventAsync(webhookEvent);
+
+        Assert.False(firstResult.IsSuccess);
+        Assert.True(firstResult.IsRetryable);
+        Assert.Equal("ENTITLEMENT_REVOKE_FAILED", firstResult.ErrorCode);
+        Assert.False(await _repository.HasProcessedWebhookAsync(webhookEvent.EventId));
+        var afterFailure = await _repository.GetSubscriptionAsync(subscription.SubscriptionKey);
+        Assert.NotNull(afterFailure);
+        Assert.Equal(SubscriptionStatus.Active, afterFailure.Status);
+        Assert.Single(afterFailure.ActiveEconomyItemIds);
+
+        var retryResult = await _service.ProcessWebhookEventAsync(webhookEvent);
+
+        Assert.True(retryResult.IsSuccess);
+        Assert.True(await _repository.HasProcessedWebhookAsync(webhookEvent.EventId));
+        var afterRetry = await _repository.GetSubscriptionAsync(subscription.SubscriptionKey);
+        Assert.NotNull(afterRetry);
+        Assert.Equal(SubscriptionStatus.Expired, afterRetry.Status);
+        Assert.Empty(afterRetry.ActiveEconomyItemIds);
+        Assert.Equal(2, idempotencyKeys.Count);
+        Assert.Equal(idempotencyKeys[0], idempotencyKeys[1]);
+        Assert.False(idempotencyKeys[0].Contains(subscription.SubscriptionKey, StringComparison.Ordinal));
+        Assert.False(idempotencyKeys[0].Contains(webhookEvent.EventId, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ProcessWebhookEventAsync_OlderEvent_DoesNotOverwriteNewerTerminalState()
+    {
+        var terminalEventAtUtc = new DateTime(2026, 7, 17, 12, 0, 0, DateTimeKind.Utc);
+        var subscription = new SubscriptionRecord
+        {
+            SubscriptionKey = "apple:terminal_subscription",
+            Platform = Platform.Apple,
+            PlayerId = "player123",
+            ProductId = "premium_monthly",
+            TierKey = "premium",
+            TierPrecedence = 1,
+            Status = SubscriptionStatus.Chargeback,
+            AutoRenew = false,
+            PeriodStartUtc = terminalEventAtUtc.AddMonths(-1),
+            PeriodEndUtc = terminalEventAtUtc,
+            OriginalPurchaseDateUtc = terminalEventAtUtc.AddMonths(-6),
+            LastEventAtUtc = terminalEventAtUtc,
+            CreatedAtUtc = terminalEventAtUtc.AddMonths(-6),
+            UpdatedAtUtc = terminalEventAtUtc
+        };
+        await _repository.CreateSubscriptionAsync(subscription);
+
+        var result = await _service.ProcessWebhookEventAsync(new WebhookEvent
+        {
+            EventId = "event_stale_renewal",
+            EventType = WebhookEventType.Renewed,
+            Platform = Platform.Apple,
+            SubscriptionKey = subscription.SubscriptionKey,
+            EventTimestampUtc = terminalEventAtUtc.AddMinutes(-1),
+            PeriodStartUtc = terminalEventAtUtc.AddDays(-30),
+            PeriodEndUtc = terminalEventAtUtc.AddDays(30),
+            ReceivedAtUtc = terminalEventAtUtc.AddMinutes(1)
+        });
+
+        Assert.True(result.IsSuccess);
+        var stored = await _repository.GetSubscriptionAsync(subscription.SubscriptionKey);
+        Assert.NotNull(stored);
+        Assert.Equal(SubscriptionStatus.Chargeback, stored.Status);
+        Assert.False(stored.AutoRenew);
+        Assert.Equal(terminalEventAtUtc, stored.LastEventAtUtc);
+        _granterMock.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessWebhookEventAsync_ResumeGrantFailure_PreservesPausedStateAndRetries()
+    {
+        var subscription = await CreateTestSubscription(status: SubscriptionStatus.Paused);
+        subscription.SetActiveEconomyItemIds(Array.Empty<string>());
+        Assert.True(await _repository.UpdateSubscriptionAsync(subscription));
+
+        var idempotencyKeys = new List<string>();
+        var attempt = 0;
+        _granterMock
+            .Setup(g => g.GrantItemsAsync(It.IsAny<GrantRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((GrantRequest request, CancellationToken _) =>
+            {
+                idempotencyKeys.Add(request.IdempotencyKey);
+                attempt++;
+                return attempt == 1
+                    ? GrantResult.Failure("TEMPORARY", "Provider unavailable")
+                    : GrantResult.Success(new List<string>(request.ItemIds));
+            });
+
+        var webhookEvent = new WebhookEvent
+        {
+            EventId = "event_retryable_resume",
+            EventType = WebhookEventType.Resumed,
+            Platform = Platform.Apple,
+            SubscriptionKey = subscription.SubscriptionKey,
+            EventTimestampUtc = subscription.LastEventAtUtc.AddMinutes(1),
+            PeriodStartUtc = subscription.PeriodEndUtc,
+            PeriodEndUtc = subscription.PeriodEndUtc.AddMonths(1),
+            ReceivedAtUtc = DateTime.UtcNow
+        };
+
+        var firstResult = await _service.ProcessWebhookEventAsync(webhookEvent);
+
+        Assert.False(firstResult.IsSuccess);
+        Assert.True(firstResult.IsRetryable);
+        var afterFailure = await _repository.GetSubscriptionAsync(subscription.SubscriptionKey);
+        Assert.NotNull(afterFailure);
+        Assert.Equal(SubscriptionStatus.Paused, afterFailure.Status);
+        Assert.Empty(afterFailure.ActiveEconomyItemIds);
+
+        var retryResult = await _service.ProcessWebhookEventAsync(webhookEvent);
+
+        Assert.True(retryResult.IsSuccess);
+        var afterRetry = await _repository.GetSubscriptionAsync(subscription.SubscriptionKey);
+        Assert.NotNull(afterRetry);
+        Assert.Equal(SubscriptionStatus.Active, afterRetry.Status);
+        Assert.Equal(
+            new[] { "subscription_premium", "subscriber_badge" },
+            afterRetry.ActiveEconomyItemIds);
+        Assert.Equal(2, idempotencyKeys.Count);
+        Assert.Equal(idempotencyKeys[0], idempotencyKeys[1]);
+    }
+
+    [Fact]
+    public async Task ProcessWebhookEventAsync_RepositoryRejectsUpdate_ReturnsRetryableAndAbandonsClaim()
+    {
+        var repositoryMock = new Mock<IPurchaseRepository>();
+        var subscription = new SubscriptionRecord
+        {
+            SubscriptionKey = "apple:repository_failure",
+            Platform = Platform.Apple,
+            PlayerId = "player123",
+            ProductId = "premium_monthly",
+            TierKey = "premium",
+            TierPrecedence = 1,
+            Status = SubscriptionStatus.Active,
+            AutoRenew = true,
+            PeriodEndUtc = DateTime.UtcNow.AddDays(1),
+            LastEventAtUtc = DateTime.UtcNow,
+            CreatedAtUtc = DateTime.UtcNow.AddDays(-30),
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+        repositoryMock
+            .Setup(r => r.TryBeginWebhookProcessingAsync(
+                It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        repositoryMock
+            .Setup(r => r.GetSubscriptionAsync(
+                subscription.SubscriptionKey,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(subscription.Copy());
+        repositoryMock
+            .Setup(r => r.TryUpdateSubscriptionIfNotNewerAsync(
+                It.IsAny<SubscriptionRecord>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        repositoryMock
+            .Setup(r => r.AbandonWebhookProcessingAsync(
+                It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        var service = new SubscriptionLifecycleService(
+            repositoryMock.Object,
+            _granterMock.Object,
+            _productConfig,
+            _loggerMock.Object);
+        var result = await service.ProcessWebhookEventAsync(new WebhookEvent
+        {
+            EventId = "event_repository_failure",
+            EventType = WebhookEventType.Cancelled,
+            Platform = Platform.Apple,
+            SubscriptionKey = subscription.SubscriptionKey,
+            EventTimestampUtc = subscription.LastEventAtUtc.AddMinutes(1),
+            ReceivedAtUtc = DateTime.UtcNow
+        });
+
+        Assert.False(result.IsSuccess);
+        Assert.True(result.IsRetryable);
+        Assert.Equal("SUBSCRIPTION_UPDATE_FAILED", result.ErrorCode);
+        repositoryMock.Verify(
+            r => r.AbandonWebhookProcessingAsync(
+                "event_repository_failure",
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+        repositoryMock.Verify(
+            r => r.CompleteWebhookProcessingAsync(
+                It.IsAny<string>(),
+                It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public void SubscriptionEntity_RoundTrip_PreservesImmutableMultiItemSnapshot()
+    {
+        var mutableInput = new List<string>
+        {
+            "subscription_premium",
+            "subscriber_badge"
+        };
+        var subscription = new SubscriptionRecord
+        {
+            SubscriptionKey = "apple:entity_round_trip",
+            Platform = Platform.Apple,
+            PlayerId = "player123",
+            ProductId = "premium_monthly",
+            TierKey = "premium",
+            Status = SubscriptionStatus.Active,
+            LatestStoreOrderId = "GPA.audit-order-id",
+            IsSandbox = true
+        };
+        subscription.SetActiveEconomyItemIds(mutableInput);
+        mutableInput.Clear();
+
+        var entity = SubscriptionEntity.FromRecord(subscription, "title");
+        var roundTripped = entity.ToRecord();
+
+        Assert.Equal(
+            new[] { "subscription_premium", "subscriber_badge" },
+            subscription.ActiveEconomyItemIds);
+        Assert.Equal(
+            new[] { "subscription_premium", "subscriber_badge" },
+            roundTripped.ActiveEconomyItemIds);
+        Assert.Equal("GPA.audit-order-id", roundTripped.LatestStoreOrderId);
+        Assert.True(roundTripped.IsSandbox);
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<string>)roundTripped.ActiveEconomyItemIds).Add("unexpected"));
+
+        var legacyEntity = new SubscriptionEntity
+        {
+            Status = SubscriptionStatus.Active.ToString(),
+            ActiveEconomyItemId = "legacy_subscription_item",
+            ActiveEconomyItemIdsJson = null
+        };
+        var legacyRecord = legacyEntity.ToRecord();
+        Assert.Equal(
+            new[] { "legacy_subscription_item" },
+            legacyRecord.ActiveEconomyItemIds);
     }
 }

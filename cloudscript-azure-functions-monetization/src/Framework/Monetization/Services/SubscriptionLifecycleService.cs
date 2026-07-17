@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -9,10 +12,16 @@ using Serhat.Forge.CloudScript.Infrastructure.Security;
 namespace Serhat.Forge.CloudScript.Framework.Monetization.Services;
 
 /// <summary>
-/// Service for handling subscription lifecycle events from webhooks.
+/// Processes durable, idempotent subscription lifecycle transitions from store webhooks.
+/// Provider inventory side effects always succeed before the subscription state is committed.
 /// </summary>
 public sealed class SubscriptionLifecycleService
 {
+    private const string EntitlementGrantFailedCode = "ENTITLEMENT_GRANT_FAILED";
+    private const string EntitlementRevokeFailedCode = "ENTITLEMENT_REVOKE_FAILED";
+    private const string SubscriptionUpdateFailedCode = "SUBSCRIPTION_UPDATE_FAILED";
+    private const string SubscriptionConfigurationFailedCode = "SUBSCRIPTION_CONFIGURATION_FAILED";
+
     private readonly IPurchaseRepository _repository;
     private readonly IEntitlementGranter _granter;
     private readonly ProductAllowlistConfig _productConfig;
@@ -40,7 +49,9 @@ public sealed class SubscriptionLifecycleService
         ArgumentNullException.ThrowIfNull(webhookEvent);
         if (string.IsNullOrWhiteSpace(webhookEvent.EventId))
         {
-            return WebhookProcessingResult.Failure("Webhook event ID is required", "MISSING_EVENT_ID");
+            return WebhookProcessingResult.Failure(
+                "Webhook event ID is required",
+                "MISSING_EVENT_ID");
         }
 
         var eventToken = SensitiveLogValue.Fingerprint(webhookEvent.EventId);
@@ -59,38 +70,54 @@ public sealed class SubscriptionLifecycleService
 
         try
         {
-            if (string.IsNullOrEmpty(webhookEvent.SubscriptionKey))
+            WebhookProcessingResult result;
+            var subscriptionKey = webhookEvent.SubscriptionKey;
+            if (string.IsNullOrWhiteSpace(subscriptionKey))
             {
                 _logger.LogWarning("Webhook has no subscription identity: EventToken={EventToken}", eventToken);
-                await _repository.CompleteWebhookProcessingAsync(webhookEvent.EventId, ct);
-                return WebhookProcessingResult.Success();
+                result = WebhookProcessingResult.Success();
             }
-
-            var subscription = await _repository.GetSubscriptionAsync(webhookEvent.SubscriptionKey, ct);
-            if (subscription == null)
+            else
             {
-                _logger.LogWarning(
-                    "Webhook subscription was not found: SubscriptionToken={SubscriptionToken}",
-                    subscriptionToken);
-                await _repository.CompleteWebhookProcessingAsync(webhookEvent.EventId, ct);
-                return WebhookProcessingResult.Success();
+                var durableSubscription = await _repository.GetSubscriptionAsync(subscriptionKey, ct);
+                if (durableSubscription == null)
+                {
+                    _logger.LogWarning(
+                        "Webhook subscription was not found: SubscriptionToken={SubscriptionToken}",
+                        subscriptionToken);
+                    result = WebhookProcessingResult.Success();
+                }
+                else if (IsStaleEvent(durableSubscription, webhookEvent))
+                {
+                    _logger.LogInformation(
+                        "Stale subscription event ignored: Type={EventType}, EventToken={EventToken}, SubscriptionToken={SubscriptionToken}",
+                        webhookEvent.EventType,
+                        eventToken,
+                        subscriptionToken);
+                    result = WebhookProcessingResult.Success();
+                }
+                else
+                {
+                    // Never mutate a repository-owned object. Provider failures must leave the
+                    // durable state unchanged so the same claimed event can be retried safely.
+                    var candidate = durableSubscription.Copy();
+                    result = webhookEvent.EventType switch
+                    {
+                        WebhookEventType.Renewed => await HandleRenewalAsync(candidate, webhookEvent, ct),
+                        WebhookEventType.Cancelled => await HandleCancellationAsync(candidate, webhookEvent, ct),
+                        WebhookEventType.Expired => await HandleExpirationAsync(candidate, webhookEvent, ct),
+                        WebhookEventType.Refunded => await HandleRefundAsync(candidate, webhookEvent, ct),
+                        WebhookEventType.Chargeback => await HandleChargebackAsync(candidate, webhookEvent, ct),
+                        WebhookEventType.GracePeriodStarted => await HandleGracePeriodAsync(candidate, webhookEvent, ct),
+                        WebhookEventType.GracePeriodEnded => await HandleGracePeriodEndedAsync(candidate, webhookEvent, ct),
+                        WebhookEventType.Paused => await HandlePausedAsync(candidate, webhookEvent, ct),
+                        WebhookEventType.Resumed => await HandleResumedAsync(candidate, webhookEvent, ct),
+                        WebhookEventType.UpgradeDowngrade => await HandleTierChangeAsync(candidate, webhookEvent, ct),
+                        WebhookEventType.Revoked => await HandleRevokedAsync(candidate, webhookEvent, ct),
+                        _ => WebhookProcessingResult.Success()
+                    };
+                }
             }
-
-            var result = webhookEvent.EventType switch
-            {
-                WebhookEventType.Renewed => await HandleRenewalAsync(subscription, webhookEvent, ct),
-                WebhookEventType.Cancelled => await HandleCancellationAsync(subscription, webhookEvent, ct),
-                WebhookEventType.Expired => await HandleExpirationAsync(subscription, webhookEvent, ct),
-                WebhookEventType.Refunded => await HandleRefundAsync(subscription, webhookEvent, ct),
-                WebhookEventType.Chargeback => await HandleChargebackAsync(subscription, webhookEvent, ct),
-                WebhookEventType.GracePeriodStarted => await HandleGracePeriodAsync(subscription, webhookEvent, ct),
-                WebhookEventType.GracePeriodEnded => await HandleGracePeriodEndedAsync(subscription, webhookEvent, ct),
-                WebhookEventType.Paused => await HandlePausedAsync(subscription, webhookEvent, ct),
-                WebhookEventType.Resumed => await HandleResumedAsync(subscription, webhookEvent, ct),
-                WebhookEventType.UpgradeDowngrade => await HandleTierChangeAsync(subscription, webhookEvent, ct),
-                WebhookEventType.Revoked => await HandleRevokedAsync(subscription, webhookEvent, ct),
-                _ => WebhookProcessingResult.Success()
-            };
 
             if (result.IsRetryable)
             {
@@ -121,32 +148,52 @@ public sealed class SubscriptionLifecycleService
             throw;
         }
     }
+
     private async Task<WebhookProcessingResult> HandleRenewalAsync(
         SubscriptionRecord subscription,
         WebhookEvent evt,
         CancellationToken ct)
     {
-        _logger.LogInformation("Processing renewal for {SubscriptionToken}", SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        _logger.LogInformation(
+            "Processing renewal for {SubscriptionToken}",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
 
-        subscription.Status = SubscriptionStatus.Active;
-        subscription.AutoRenew = true;
-        subscription.PeriodStartUtc = evt.PeriodStartUtc ?? DateTime.UtcNow;
-        subscription.PeriodEndUtc = evt.PeriodEndUtc ?? DateTime.UtcNow.AddMonths(1);
-        subscription.GracePeriodEndUtc = null;
-        subscription.LastEventAtUtc = DateTime.UtcNow;
-        subscription.UpdatedAtUtc = DateTime.UtcNow;
-
-        // Apply pending tier change if any
-        if (!string.IsNullOrEmpty(subscription.PendingTierKey))
+        if (!string.IsNullOrWhiteSpace(subscription.PendingTierKey))
         {
-            await ApplyTierChangeAsync(subscription, subscription.PendingTierKey, ct);
+            var pendingProduct = ResolveSubscriptionProduct(
+                subscription.PendingProductId,
+                subscription.PendingTierKey);
+            if (pendingProduct == null)
+            {
+                return ConfigurationFailure(subscription, subscription.PendingProductId);
+            }
+
+            var sideEffectFailure = await ApplyTierSideEffectsAsync(
+                subscription,
+                pendingProduct,
+                evt,
+                ct);
+            if (sideEffectFailure != null)
+            {
+                return sideEffectFailure;
+            }
+
+            subscription.ProductId = pendingProduct.ProductId;
+            subscription.TierKey = pendingProduct.TierKey ?? subscription.PendingTierKey;
+            subscription.TierPrecedence = pendingProduct.TierPrecedence;
             subscription.PendingTierKey = null;
             subscription.PendingProductId = null;
         }
 
-        await _repository.UpdateSubscriptionAsync(subscription, ct);
+        var eventAtUtc = ResolveEventTimestampUtc(evt);
+        subscription.Status = SubscriptionStatus.Active;
+        subscription.AutoRenew = evt.AutoRenew ?? true;
+        subscription.PeriodStartUtc = evt.PeriodStartUtc ?? eventAtUtc;
+        subscription.PeriodEndUtc = evt.PeriodEndUtc ?? eventAtUtc.AddMonths(1);
+        subscription.GracePeriodEndUtc = null;
+        MarkEventApplied(subscription, eventAtUtc);
 
-        return WebhookProcessingResult.Success();
+        return await CommitAsync(subscription, ct);
     }
 
     private async Task<WebhookProcessingResult> HandleCancellationAsync(
@@ -154,109 +201,70 @@ public sealed class SubscriptionLifecycleService
         WebhookEvent evt,
         CancellationToken ct)
     {
-        _logger.LogInformation("Processing cancellation for {SubscriptionToken}", SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        _logger.LogInformation(
+            "Processing cancellation for {SubscriptionToken}",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
 
         subscription.Status = SubscriptionStatus.Cancelled;
         subscription.AutoRenew = false;
-        subscription.LastEventAtUtc = DateTime.UtcNow;
-        subscription.UpdatedAtUtc = DateTime.UtcNow;
+        MarkEventApplied(subscription, ResolveEventTimestampUtc(evt));
 
-        await _repository.UpdateSubscriptionAsync(subscription, ct);
-
-        // Note: Don't revoke entitlements until period ends
-        // The IsActive property will handle this
-
-        return WebhookProcessingResult.Success();
+        // Cancellation retains benefits until the already-paid period expires.
+        return await CommitAsync(subscription, ct);
     }
 
-    private async Task<WebhookProcessingResult> HandleExpirationAsync(
+    private Task<WebhookProcessingResult> HandleExpirationAsync(
         SubscriptionRecord subscription,
         WebhookEvent evt,
         CancellationToken ct)
     {
-        _logger.LogInformation("Processing expiration for {SubscriptionToken}", SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
-
-        subscription.Status = SubscriptionStatus.Expired;
-        subscription.AutoRenew = false;
-        subscription.LastEventAtUtc = DateTime.UtcNow;
-        subscription.UpdatedAtUtc = DateTime.UtcNow;
-
-        await _repository.UpdateSubscriptionAsync(subscription, ct);
-
-        // Revoke entitlements
-        if (!string.IsNullOrEmpty(subscription.ActiveEconomyItemId))
-        {
-            var revokeRequest = new RevokeRequest
-            {
-                PlayerId = subscription.PlayerId,
-                ItemIds = new System.Collections.Generic.List<string> { subscription.ActiveEconomyItemId },
-                IdempotencyKey = $"revoke:{subscription.SubscriptionKey}:{DateTime.UtcNow:yyyyMMdd}"
-            };
-
-            await _granter.RevokeItemsAsync(revokeRequest, ct);
-        }
-
-        return WebhookProcessingResult.Success();
+        _logger.LogInformation(
+            "Processing expiration for {SubscriptionToken}",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        return RevokeAllAndCommitAsync(
+            subscription,
+            evt,
+            SubscriptionStatus.Expired,
+            autoRenew: false,
+            clearGracePeriod: true,
+            operation: "expire",
+            ct);
     }
 
-    private async Task<WebhookProcessingResult> HandleRefundAsync(
+    private Task<WebhookProcessingResult> HandleRefundAsync(
         SubscriptionRecord subscription,
         WebhookEvent evt,
         CancellationToken ct)
     {
-        _logger.LogInformation("Processing refund for {SubscriptionToken}", SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
-
-        subscription.Status = SubscriptionStatus.Refunded;
-        subscription.AutoRenew = false;
-        subscription.LastEventAtUtc = DateTime.UtcNow;
-        subscription.UpdatedAtUtc = DateTime.UtcNow;
-
-        await _repository.UpdateSubscriptionAsync(subscription, ct);
-
-        // Revoke entitlements immediately on refund
-        if (!string.IsNullOrEmpty(subscription.ActiveEconomyItemId))
-        {
-            var revokeRequest = new RevokeRequest
-            {
-                PlayerId = subscription.PlayerId,
-                ItemIds = new System.Collections.Generic.List<string> { subscription.ActiveEconomyItemId },
-                IdempotencyKey = $"refund:{subscription.SubscriptionKey}:{evt.EventId}"
-            };
-
-            await _granter.RevokeItemsAsync(revokeRequest, ct);
-        }
-
-        return WebhookProcessingResult.Success();
+        _logger.LogInformation(
+            "Processing refund for {SubscriptionToken}",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        return RevokeAllAndCommitAsync(
+            subscription,
+            evt,
+            SubscriptionStatus.Refunded,
+            autoRenew: false,
+            clearGracePeriod: true,
+            operation: "refund",
+            ct);
     }
 
-    private async Task<WebhookProcessingResult> HandleChargebackAsync(
+    private Task<WebhookProcessingResult> HandleChargebackAsync(
         SubscriptionRecord subscription,
         WebhookEvent evt,
         CancellationToken ct)
     {
-        _logger.LogWarning("Processing chargeback for {SubscriptionToken}", SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
-
-        subscription.Status = SubscriptionStatus.Chargeback;
-        subscription.AutoRenew = false;
-        subscription.LastEventAtUtc = DateTime.UtcNow;
-        subscription.UpdatedAtUtc = DateTime.UtcNow;
-
-        await _repository.UpdateSubscriptionAsync(subscription, ct);
-
-        // Revoke entitlements immediately on chargeback
-        if (!string.IsNullOrEmpty(subscription.ActiveEconomyItemId))
-        {
-            var revokeRequest = new RevokeRequest
-            {
-                PlayerId = subscription.PlayerId,
-                ItemIds = new System.Collections.Generic.List<string> { subscription.ActiveEconomyItemId },
-                IdempotencyKey = $"chargeback:{subscription.SubscriptionKey}:{evt.EventId}"
-            };
-
-            await _granter.RevokeItemsAsync(revokeRequest, ct);
-        }
-
-        return WebhookProcessingResult.Success();
+        _logger.LogWarning(
+            "Processing chargeback for {SubscriptionToken}",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        return RevokeAllAndCommitAsync(
+            subscription,
+            evt,
+            SubscriptionStatus.Chargeback,
+            autoRenew: false,
+            clearGracePeriod: true,
+            operation: "chargeback",
+            ct);
     }
 
     private async Task<WebhookProcessingResult> HandleGracePeriodAsync(
@@ -264,81 +272,58 @@ public sealed class SubscriptionLifecycleService
         WebhookEvent evt,
         CancellationToken ct)
     {
-        _logger.LogInformation("Processing grace period start for {SubscriptionToken}", SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        _logger.LogInformation(
+            "Processing grace period start for {SubscriptionToken}",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
 
         subscription.Status = SubscriptionStatus.GracePeriod;
         subscription.GracePeriodEndUtc = evt.GracePeriodEndUtc;
-        subscription.LastEventAtUtc = DateTime.UtcNow;
-        subscription.UpdatedAtUtc = DateTime.UtcNow;
+        MarkEventApplied(subscription, ResolveEventTimestampUtc(evt));
 
-        await _repository.UpdateSubscriptionAsync(subscription, ct);
-
-        // Keep entitlements active during grace period
-
-        return WebhookProcessingResult.Success();
+        // Benefits remain active throughout the provider-declared grace period.
+        return await CommitAsync(subscription, ct);
     }
 
-    private async Task<WebhookProcessingResult> HandleGracePeriodEndedAsync(
+    private Task<WebhookProcessingResult> HandleGracePeriodEndedAsync(
         SubscriptionRecord subscription,
         WebhookEvent evt,
         CancellationToken ct)
     {
-        _logger.LogInformation("Processing grace period end for {SubscriptionToken}", SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        _logger.LogInformation(
+            "Processing grace period end for {SubscriptionToken}",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
 
-        // If still in grace period status, payment failed - expire it
-        if (subscription.Status == SubscriptionStatus.GracePeriod)
+        if (subscription.Status != SubscriptionStatus.GracePeriod)
         {
-            subscription.Status = SubscriptionStatus.Expired;
-            subscription.GracePeriodEndUtc = null;
-            subscription.LastEventAtUtc = DateTime.UtcNow;
-            subscription.UpdatedAtUtc = DateTime.UtcNow;
-
-            await _repository.UpdateSubscriptionAsync(subscription, ct);
-
-            // Revoke entitlements
-            if (!string.IsNullOrEmpty(subscription.ActiveEconomyItemId))
-            {
-                var revokeRequest = new RevokeRequest
-                {
-                    PlayerId = subscription.PlayerId,
-                    ItemIds = new System.Collections.Generic.List<string> { subscription.ActiveEconomyItemId },
-                    IdempotencyKey = $"grace-end:{subscription.SubscriptionKey}:{evt.EventId}"
-                };
-
-                await _granter.RevokeItemsAsync(revokeRequest, ct);
-            }
+            return Task.FromResult(WebhookProcessingResult.Success());
         }
 
-        return WebhookProcessingResult.Success();
+        return RevokeAllAndCommitAsync(
+            subscription,
+            evt,
+            SubscriptionStatus.Expired,
+            autoRenew: false,
+            clearGracePeriod: true,
+            operation: "grace-end",
+            ct);
     }
 
-    private async Task<WebhookProcessingResult> HandlePausedAsync(
+    private Task<WebhookProcessingResult> HandlePausedAsync(
         SubscriptionRecord subscription,
         WebhookEvent evt,
         CancellationToken ct)
     {
-        _logger.LogInformation("Processing pause for {SubscriptionToken}", SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
-
-        subscription.Status = SubscriptionStatus.Paused;
-        subscription.LastEventAtUtc = DateTime.UtcNow;
-        subscription.UpdatedAtUtc = DateTime.UtcNow;
-
-        await _repository.UpdateSubscriptionAsync(subscription, ct);
-
-        // Revoke entitlements while paused
-        if (!string.IsNullOrEmpty(subscription.ActiveEconomyItemId))
-        {
-            var revokeRequest = new RevokeRequest
-            {
-                PlayerId = subscription.PlayerId,
-                ItemIds = new System.Collections.Generic.List<string> { subscription.ActiveEconomyItemId },
-                IdempotencyKey = $"pause:{subscription.SubscriptionKey}:{evt.EventId}"
-            };
-
-            await _granter.RevokeItemsAsync(revokeRequest, ct);
-        }
-
-        return WebhookProcessingResult.Success();
+        _logger.LogInformation(
+            "Processing pause for {SubscriptionToken}",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        return RevokeAllAndCommitAsync(
+            subscription,
+            evt,
+            SubscriptionStatus.Paused,
+            autoRenew: null,
+            clearGracePeriod: false,
+            operation: "pause",
+            ct);
     }
 
     private async Task<WebhookProcessingResult> HandleResumedAsync(
@@ -346,31 +331,37 @@ public sealed class SubscriptionLifecycleService
         WebhookEvent evt,
         CancellationToken ct)
     {
-        _logger.LogInformation("Processing resume for {SubscriptionToken}", SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        _logger.LogInformation(
+            "Processing resume for {SubscriptionToken}",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
 
-        subscription.Status = SubscriptionStatus.Active;
-        subscription.PeriodStartUtc = evt.PeriodStartUtc ?? DateTime.UtcNow;
-        subscription.PeriodEndUtc = evt.PeriodEndUtc ?? DateTime.UtcNow.AddMonths(1);
-        subscription.LastEventAtUtc = DateTime.UtcNow;
-        subscription.UpdatedAtUtc = DateTime.UtcNow;
-
-        await _repository.UpdateSubscriptionAsync(subscription, ct);
-
-        // Re-grant entitlements
-        var productConfig = _productConfig.GetProduct(subscription.ProductId);
-        if (productConfig != null && productConfig.EconomyItemIds.Count > 0)
+        var product = _productConfig.GetProduct(subscription.ProductId);
+        if (product == null || !product.IsSubscription)
         {
-            var grantRequest = new GrantRequest
-            {
-                PlayerId = subscription.PlayerId,
-                ItemIds = productConfig.EconomyItemIds,
-                IdempotencyKey = $"resume:{subscription.SubscriptionKey}:{evt.EventId}"
-            };
-
-            await _granter.GrantItemsAsync(grantRequest, ct);
+            return ConfigurationFailure(subscription, subscription.ProductId);
         }
 
-        return WebhookProcessingResult.Success();
+        var grantFailure = await GrantItemsAsync(
+            subscription,
+            product.EconomyItemIds,
+            "resume-grant",
+            evt,
+            ct);
+        if (grantFailure != null)
+        {
+            return grantFailure;
+        }
+
+        var eventAtUtc = ResolveEventTimestampUtc(evt);
+        subscription.SetActiveEconomyItemIds(product.EconomyItemIds);
+        subscription.Status = SubscriptionStatus.Active;
+        subscription.AutoRenew = evt.AutoRenew ?? true;
+        subscription.PeriodStartUtc = evt.PeriodStartUtc ?? eventAtUtc;
+        subscription.PeriodEndUtc = evt.PeriodEndUtc ?? eventAtUtc.AddMonths(1);
+        subscription.GracePeriodEndUtc = null;
+        MarkEventApplied(subscription, eventAtUtc);
+
+        return await CommitAsync(subscription, ct);
     }
 
     private async Task<WebhookProcessingResult> HandleTierChangeAsync(
@@ -380,126 +371,374 @@ public sealed class SubscriptionLifecycleService
     {
         _logger.LogInformation(
             "Processing tier change for {SubscriptionToken}: {OldTier} -> {NewTier}",
-            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey), subscription.TierKey, evt.NewTierKey);
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey),
+            subscription.TierKey,
+            evt.NewTierKey);
 
-        if (string.IsNullOrEmpty(evt.NewTierKey))
+        if (string.IsNullOrWhiteSpace(evt.NewTierKey))
         {
             return WebhookProcessingResult.Success();
         }
 
-        var newProductConfig = _productConfig.GetProduct(evt.NewProductId ?? subscription.ProductId);
-        if (newProductConfig == null)
+        var newProduct = ResolveSubscriptionProduct(evt.NewProductId, evt.NewTierKey);
+        if (newProduct == null)
         {
-            _logger.LogWarning("New product not found: {ProductId}", evt.NewProductId);
-            return WebhookProcessingResult.Success();
+            return ConfigurationFailure(subscription, evt.NewProductId);
         }
 
-        var isUpgrade = newProductConfig.TierPrecedence > subscription.TierPrecedence;
-
-        if (isUpgrade)
+        if (newProduct.TierPrecedence > subscription.TierPrecedence)
         {
-            // Upgrades take effect immediately
-            await ApplyTierChangeAsync(subscription, evt.NewTierKey, ct);
-            subscription.TierKey = evt.NewTierKey;
-            subscription.TierPrecedence = newProductConfig.TierPrecedence;
-            if (!string.IsNullOrEmpty(evt.NewProductId))
+            var sideEffectFailure = await ApplyTierSideEffectsAsync(
+                subscription,
+                newProduct,
+                evt,
+                ct);
+            if (sideEffectFailure != null)
             {
-                subscription.ProductId = evt.NewProductId;
+                return sideEffectFailure;
             }
+
+            subscription.ProductId = newProduct.ProductId;
+            subscription.TierKey = newProduct.TierKey ?? evt.NewTierKey;
+            subscription.TierPrecedence = newProduct.TierPrecedence;
+            subscription.PendingTierKey = null;
+            subscription.PendingProductId = null;
         }
         else
         {
-            // Downgrades take effect at next renewal
-            subscription.PendingTierKey = evt.NewTierKey;
-            subscription.PendingProductId = evt.NewProductId;
+            // Downgrades retain the paid higher tier until the next renewal.
+            subscription.PendingTierKey = newProduct.TierKey ?? evt.NewTierKey;
+            subscription.PendingProductId = newProduct.ProductId;
         }
 
-        subscription.LastEventAtUtc = DateTime.UtcNow;
-        subscription.UpdatedAtUtc = DateTime.UtcNow;
-
-        await _repository.UpdateSubscriptionAsync(subscription, ct);
-
-        return WebhookProcessingResult.Success();
+        MarkEventApplied(subscription, ResolveEventTimestampUtc(evt));
+        return await CommitAsync(subscription, ct);
     }
 
-    private async Task<WebhookProcessingResult> HandleRevokedAsync(
+    private Task<WebhookProcessingResult> HandleRevokedAsync(
         SubscriptionRecord subscription,
         WebhookEvent evt,
         CancellationToken ct)
     {
-        _logger.LogWarning("Processing revocation for {SubscriptionToken}", SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
-
-        subscription.Status = SubscriptionStatus.Expired;
-        subscription.AutoRenew = false;
-        subscription.LastEventAtUtc = DateTime.UtcNow;
-        subscription.UpdatedAtUtc = DateTime.UtcNow;
-
-        await _repository.UpdateSubscriptionAsync(subscription, ct);
-
-        // Revoke entitlements
-        if (!string.IsNullOrEmpty(subscription.ActiveEconomyItemId))
-        {
-            var revokeRequest = new RevokeRequest
-            {
-                PlayerId = subscription.PlayerId,
-                ItemIds = new System.Collections.Generic.List<string> { subscription.ActiveEconomyItemId },
-                IdempotencyKey = $"revoked:{subscription.SubscriptionKey}:{evt.EventId}"
-            };
-
-            await _granter.RevokeItemsAsync(revokeRequest, ct);
-        }
-
-        return WebhookProcessingResult.Success();
+        _logger.LogWarning(
+            "Processing revocation for {SubscriptionToken}",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        return RevokeAllAndCommitAsync(
+            subscription,
+            evt,
+            SubscriptionStatus.Expired,
+            autoRenew: false,
+            clearGracePeriod: true,
+            operation: "revoke",
+            ct);
     }
 
-    private async Task ApplyTierChangeAsync(
+    private async Task<WebhookProcessingResult> RevokeAllAndCommitAsync(
         SubscriptionRecord subscription,
-        string newTierKey,
+        WebhookEvent evt,
+        SubscriptionStatus newStatus,
+        bool? autoRenew,
+        bool clearGracePeriod,
+        string operation,
         CancellationToken ct)
     {
-        // Find the product for the new tier
-        ProductConfig? newProductConfig = null;
-        foreach (var kvp in _productConfig.Products)
+        var revokeFailure = await RevokeItemsAsync(
+            subscription,
+            subscription.ActiveEconomyItemIds,
+            operation,
+            evt,
+            ct);
+        if (revokeFailure != null)
         {
-            if (kvp.Value.TierKey == newTierKey && kvp.Value.IsSubscription)
+            return revokeFailure;
+        }
+
+        subscription.SetActiveEconomyItemIds(Array.Empty<string>());
+        subscription.Status = newStatus;
+        if (autoRenew.HasValue)
+        {
+            subscription.AutoRenew = autoRenew.Value;
+        }
+
+        if (clearGracePeriod)
+        {
+            subscription.GracePeriodEndUtc = null;
+        }
+
+        MarkEventApplied(subscription, ResolveEventTimestampUtc(evt));
+        return await CommitAsync(subscription, ct);
+    }
+
+    private async Task<WebhookProcessingResult?> ApplyTierSideEffectsAsync(
+        SubscriptionRecord subscription,
+        ProductConfig newProduct,
+        WebhookEvent evt,
+        CancellationToken ct)
+    {
+        var revokeFailure = await RevokeItemsAsync(
+            subscription,
+            subscription.ActiveEconomyItemIds,
+            "tier-revoke",
+            evt,
+            ct);
+        if (revokeFailure != null)
+        {
+            return revokeFailure;
+        }
+
+        var grantFailure = await GrantItemsAsync(
+            subscription,
+            newProduct.EconomyItemIds,
+            "tier-grant",
+            evt,
+            ct);
+        if (grantFailure != null)
+        {
+            return grantFailure;
+        }
+
+        subscription.SetActiveEconomyItemIds(newProduct.EconomyItemIds);
+        return null;
+    }
+
+    private async Task<WebhookProcessingResult?> GrantItemsAsync(
+        SubscriptionRecord subscription,
+        IReadOnlyList<string> itemIds,
+        string operation,
+        WebhookEvent evt,
+        CancellationToken ct)
+    {
+        if (itemIds.Count == 0)
+        {
+            return null;
+        }
+
+        GrantResult? result;
+        try
+        {
+            result = await _granter.GrantItemsAsync(
+                new GrantRequest
+                {
+                    PlayerId = subscription.PlayerId,
+                    ItemIds = new List<string>(itemIds),
+                    IdempotencyKey = CreateIdempotencyKey(
+                        "grant",
+                        operation,
+                        subscription,
+                        evt)
+                },
+                ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogWarning(
+                "Subscription grant provider threw: Operation={Operation}, ErrorType={ErrorType}, SubscriptionToken={SubscriptionToken}",
+                operation,
+                error.GetType().Name,
+                SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+            return RetryableFailure("Subscription entitlement grant failed", EntitlementGrantFailedCode);
+        }
+
+        if (result?.IsSuccess == true)
+        {
+            return null;
+        }
+
+        _logger.LogWarning(
+            "Subscription grant provider failed: Operation={Operation}, ProviderCode={ProviderCode}, SubscriptionToken={SubscriptionToken}",
+            operation,
+            result?.ErrorCode ?? "NO_RESULT",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        return RetryableFailure("Subscription entitlement grant failed", EntitlementGrantFailedCode);
+    }
+
+    private async Task<WebhookProcessingResult?> RevokeItemsAsync(
+        SubscriptionRecord subscription,
+        IReadOnlyList<string> itemIds,
+        string operation,
+        WebhookEvent evt,
+        CancellationToken ct)
+    {
+        if (itemIds.Count == 0)
+        {
+            return null;
+        }
+
+        GrantResult? result;
+        try
+        {
+            result = await _granter.RevokeItemsAsync(
+                new RevokeRequest
+                {
+                    PlayerId = subscription.PlayerId,
+                    ItemIds = new List<string>(itemIds),
+                    IdempotencyKey = CreateIdempotencyKey(
+                        "revoke",
+                        operation,
+                        subscription,
+                        evt)
+                },
+                ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogWarning(
+                "Subscription revoke provider threw: Operation={Operation}, ErrorType={ErrorType}, SubscriptionToken={SubscriptionToken}",
+                operation,
+                error.GetType().Name,
+                SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+            return RetryableFailure("Subscription entitlement revoke failed", EntitlementRevokeFailedCode);
+        }
+
+        if (result?.IsSuccess == true)
+        {
+            return null;
+        }
+
+        _logger.LogWarning(
+            "Subscription revoke provider failed: Operation={Operation}, ProviderCode={ProviderCode}, SubscriptionToken={SubscriptionToken}",
+            operation,
+            result?.ErrorCode ?? "NO_RESULT",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        return RetryableFailure("Subscription entitlement revoke failed", EntitlementRevokeFailedCode);
+    }
+
+    private async Task<WebhookProcessingResult> CommitAsync(
+        SubscriptionRecord subscription,
+        CancellationToken ct)
+    {
+        try
+        {
+            if (await _repository.TryUpdateSubscriptionIfNotNewerAsync(subscription, ct))
             {
-                newProductConfig = kvp.Value;
-                break;
+                return WebhookProcessingResult.Success();
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogWarning(
+                "Subscription state update threw: ErrorType={ErrorType}, SubscriptionToken={SubscriptionToken}",
+                error.GetType().Name,
+                SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+            return RetryableFailure("Subscription state update failed", SubscriptionUpdateFailedCode);
+        }
+
+        _logger.LogWarning(
+            "Subscription state update was rejected: SubscriptionToken={SubscriptionToken}",
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        return RetryableFailure("Subscription state update failed", SubscriptionUpdateFailedCode);
+    }
+
+    private ProductConfig? ResolveSubscriptionProduct(string? productId, string? tierKey)
+    {
+        if (!string.IsNullOrWhiteSpace(productId))
+        {
+            var exactProduct = _productConfig.GetProduct(productId);
+            if (exactProduct?.IsSubscription == true)
+            {
+                return exactProduct;
             }
         }
 
-        if (newProductConfig == null)
+        if (string.IsNullOrWhiteSpace(tierKey))
         {
-            _logger.LogWarning("Product config not found for tier: {TierKey}", newTierKey);
-            return;
+            return null;
         }
 
-        // Revoke old entitlement
-        if (!string.IsNullOrEmpty(subscription.ActiveEconomyItemId))
+        foreach (var product in _productConfig.Products.Values)
         {
-            var revokeRequest = new RevokeRequest
+            if (product.Enabled &&
+                product.IsSubscription &&
+                string.Equals(product.TierKey, tierKey, StringComparison.Ordinal))
             {
-                PlayerId = subscription.PlayerId,
-                ItemIds = new System.Collections.Generic.List<string> { subscription.ActiveEconomyItemId },
-                IdempotencyKey = $"tier-change-revoke:{subscription.SubscriptionKey}:{newTierKey}"
-            };
-
-            await _granter.RevokeItemsAsync(revokeRequest, ct);
+                return product;
+            }
         }
 
-        // Grant new entitlement
-        if (newProductConfig.EconomyItemIds.Count > 0)
+        return null;
+    }
+
+    private WebhookProcessingResult ConfigurationFailure(
+        SubscriptionRecord subscription,
+        string? productId)
+    {
+        _logger.LogWarning(
+            "Subscription product configuration was not found: ProductId={ProductId}, SubscriptionToken={SubscriptionToken}",
+            productId,
+            SensitiveLogValue.Fingerprint(subscription.SubscriptionKey));
+        return RetryableFailure(
+            "Subscription product configuration is unavailable",
+            SubscriptionConfigurationFailedCode);
+    }
+
+    private static WebhookProcessingResult RetryableFailure(string message, string errorCode) =>
+        WebhookProcessingResult.Failure(message, errorCode, retryable: true);
+
+    private static bool IsStaleEvent(SubscriptionRecord subscription, WebhookEvent evt)
+    {
+        if (evt.EventTimestampUtc == default || subscription.LastEventAtUtc == default)
         {
-            var grantRequest = new GrantRequest
-            {
-                PlayerId = subscription.PlayerId,
-                ItemIds = newProductConfig.EconomyItemIds,
-                IdempotencyKey = $"tier-change-grant:{subscription.SubscriptionKey}:{newTierKey}"
-            };
-
-            await _granter.GrantItemsAsync(grantRequest, ct);
-
-            subscription.ActiveEconomyItemId = newProductConfig.EconomyItemIds[0];
+            return false;
         }
+
+        return NormalizeUtc(evt.EventTimestampUtc) < NormalizeUtc(subscription.LastEventAtUtc);
+    }
+
+    private static DateTime ResolveEventTimestampUtc(WebhookEvent evt)
+    {
+        if (evt.EventTimestampUtc != default)
+        {
+            return NormalizeUtc(evt.EventTimestampUtc);
+        }
+
+        if (evt.ReceivedAtUtc.HasValue && evt.ReceivedAtUtc.Value != default)
+        {
+            return NormalizeUtc(evt.ReceivedAtUtc.Value);
+        }
+
+        return DateTime.UtcNow;
+    }
+
+    private static DateTime NormalizeUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => DateTime.SpecifyKind(value, DateTimeKind.Utc)
+    };
+
+    private static void MarkEventApplied(SubscriptionRecord subscription, DateTime eventAtUtc)
+    {
+        subscription.LastEventAtUtc = eventAtUtc;
+        subscription.UpdatedAtUtc = DateTime.UtcNow;
+    }
+
+    private static string CreateIdempotencyKey(
+        string sideEffect,
+        string operation,
+        SubscriptionRecord subscription,
+        WebhookEvent evt)
+    {
+        var hasCanonicalOperation = !string.IsNullOrWhiteSpace(evt.EntitlementOperationId);
+        var idempotencyOperation = hasCanonicalOperation ? sideEffect : operation;
+        var material = string.Concat(
+            idempotencyOperation,
+            "\n",
+            subscription.SubscriptionKey,
+            "\n",
+            hasCanonicalOperation ? evt.EntitlementOperationId : evt.EventId);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(material));
+        return $"subscription-{idempotencyOperation}:{Convert.ToHexString(hash)}";
     }
 }

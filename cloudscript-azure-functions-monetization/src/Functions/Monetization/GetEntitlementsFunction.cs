@@ -35,7 +35,8 @@ public sealed class GetEntitlementsResponseDto
 public sealed class EntitlementItemDto
 {
     public string ItemId { get; set; } = string.Empty;
-    public int Quantity { get; set; } = 1;
+    public string StackId { get; set; } = "default";
+    public long Quantity { get; set; } = 1;
     public DateTime? ExpiresAtUtc { get; set; }
 }
 
@@ -47,6 +48,10 @@ public sealed class ActiveSubscriptionDto
     public bool AutoRenew { get; set; }
     public DateTime PeriodStartUtc { get; set; }
     public DateTime PeriodEndUtc { get; set; }
+    public DateTime OriginalPurchaseDateUtc { get; set; }
+    public string Platform { get; set; } = string.Empty;
+    public string? GrantedItemId { get; set; }
+    public int? GracePeriodDaysRemaining { get; set; }
 }
 
 /// <summary>
@@ -130,18 +135,35 @@ public sealed class GetEntitlementsFunction
                 correlationId, SensitiveLogValue.Fingerprint(playerId));
 
             // Get entitlements from PlayFab inventory
-            var inventoryItems = await _granter.GetPlayerItemsAsync(playerId);
+            var inventoryResult = await _granter.GetPlayerItemsAsync(playerId, ct);
+            if (!inventoryResult.IsSuccess)
+            {
+                _logger.LogWarning(
+                    "[{CorrelationId}] Inventory query failed: Error={ErrorCode}, Retryable={Retryable}",
+                    correlationId,
+                    inventoryResult.ErrorCode,
+                    inventoryResult.IsRetryable);
+                return await CreateErrorResponse(
+                    req,
+                    "INVENTORY_UNAVAILABLE",
+                    "Entitlements are temporarily unavailable",
+                    HttpStatusCode.ServiceUnavailable,
+                    correlationId,
+                    stopwatch.ElapsedMilliseconds);
+            }
 
             // Get active subscription from repository
-            var activeSubscription = await _repository.GetActiveSubscriptionAsync(playerId);
+            var activeSubscription = await _repository.GetActiveSubscriptionAsync(playerId, ct);
 
             // Build response
             var responseDto = new GetEntitlementsResponseDto
             {
-                Entitlements = inventoryItems.Select(itemId => new EntitlementItemDto
+                Entitlements = inventoryResult.Items.Select(item => new EntitlementItemDto
                 {
-                    ItemId = itemId,
-                    Quantity = 1
+                    ItemId = item.ItemId,
+                    StackId = item.StackId,
+                    Quantity = item.Amount,
+                    ExpiresAtUtc = item.ExpiresAtUtc
                 }).ToList(),
                 ServerTimestampUtc = DateTime.UtcNow
             };
@@ -155,7 +177,11 @@ public sealed class GetEntitlementsFunction
                     Status = activeSubscription.Status.ToString(),
                     AutoRenew = activeSubscription.AutoRenew,
                     PeriodStartUtc = activeSubscription.PeriodStartUtc,
-                    PeriodEndUtc = activeSubscription.PeriodEndUtc
+                    PeriodEndUtc = activeSubscription.PeriodEndUtc,
+                    OriginalPurchaseDateUtc = activeSubscription.OriginalPurchaseDateUtc,
+                    Platform = activeSubscription.Platform,
+                    GrantedItemId = activeSubscription.ActiveEconomyItemId,
+                    GracePeriodDaysRemaining = CalculateGracePeriodDaysRemaining(activeSubscription)
                 };
             }
 
@@ -199,6 +225,17 @@ public sealed class GetEntitlementsFunction
         var response = req.CreateResponse(HttpStatusCode.OK);
         await response.WriteAsJsonAsync(envelope);
         return response;
+    }
+
+    private static int? CalculateGracePeriodDaysRemaining(SubscriptionRecord subscription)
+    {
+        if (!subscription.GracePeriodEndUtc.HasValue)
+        {
+            return null;
+        }
+
+        var remainingDays = (subscription.GracePeriodEndUtc.Value - DateTime.UtcNow).TotalDays;
+        return Math.Max(0, (int)Math.Ceiling(remainingDays));
     }
 
     private static async Task<HttpResponseData> CreateErrorResponse(

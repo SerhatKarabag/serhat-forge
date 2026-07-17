@@ -1,4 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Serhat.Forge.CloudScript.Framework.Monetization.Domain;
 
@@ -23,10 +27,15 @@ public enum SubscriptionStatus
 /// </summary>
 public sealed class SubscriptionRecord
 {
+    private static readonly ReadOnlyCollection<string> EmptyEconomyItemIds =
+        Array.AsReadOnly(Array.Empty<string>());
+
+    private ReadOnlyCollection<string> _activeEconomyItemIds = EmptyEconomyItemIds;
+
     /// <summary>
     /// Unique key for subscription.
     /// Apple: originalTransactionId
-    /// Google: purchaseToken hash (first 64 chars)
+    /// Google: full SHA-256 hash of the purchase token
     /// </summary>
     public string SubscriptionKey { get; set; } = string.Empty;
 
@@ -66,9 +75,70 @@ public sealed class SubscriptionRecord
     public string? ActiveEconomyItemId { get; set; }
 
     /// <summary>
+    /// Immutable snapshot of every Economy item currently granted by this subscription.
+    /// Records written before this field existed transparently fall back to
+    /// <see cref="ActiveEconomyItemId"/>.
+    /// </summary>
+    public IReadOnlyList<string> ActiveEconomyItemIds
+    {
+        get
+        {
+            var legacyItemId = ActiveEconomyItemId;
+            if (_activeEconomyItemIds.Count > 0 || string.IsNullOrWhiteSpace(legacyItemId))
+            {
+                return _activeEconomyItemIds;
+            }
+
+            return Array.AsReadOnly(new[] { legacyItemId });
+        }
+    }
+
+    /// <summary>
+    /// Replaces the granted-item snapshot. Input collections are copied, normalized,
+    /// de-duplicated, and never exposed as mutable storage.
+    /// </summary>
+    public void SetActiveEconomyItemIds(IEnumerable<string>? itemIds)
+    {
+        if (itemIds == null)
+        {
+            _activeEconomyItemIds = EmptyEconomyItemIds;
+            ActiveEconomyItemId = null;
+            return;
+        }
+
+        var uniqueItemIds = new HashSet<string>(StringComparer.Ordinal);
+        var snapshot = new List<string>();
+        foreach (var itemId in itemIds)
+        {
+            if (string.IsNullOrWhiteSpace(itemId) || !uniqueItemIds.Add(itemId))
+            {
+                continue;
+            }
+
+            snapshot.Add(itemId);
+        }
+
+        _activeEconomyItemIds = snapshot.Count == 0
+            ? EmptyEconomyItemIds
+            : snapshot.AsReadOnly();
+        ActiveEconomyItemId = snapshot.Count > 0 ? snapshot[0] : null;
+    }
+
+    /// <summary>
     /// Whether auto-renew is enabled.
     /// </summary>
     public bool AutoRenew { get; set; }
+
+    /// <summary>
+    /// Latest non-sensitive store order identifier observed during authoritative verification.
+    /// Purchase tokens and receipts must never be stored here.
+    /// </summary>
+    public string? LatestStoreOrderId { get; set; }
+
+    /// <summary>
+    /// Whether the latest authoritative store snapshot represents a test/sandbox purchase.
+    /// </summary>
+    public bool IsSandbox { get; set; }
 
     /// <summary>
     /// Start of current billing period.
@@ -124,6 +194,38 @@ public sealed class SubscriptionRecord
         (Status == SubscriptionStatus.Cancelled && PeriodEndUtc > DateTime.UtcNow);
 
     /// <summary>
+    /// Creates a detached copy suitable for side-effect-first lifecycle updates.
+    /// </summary>
+    public SubscriptionRecord Copy()
+    {
+        var copy = new SubscriptionRecord
+        {
+            SubscriptionKey = SubscriptionKey,
+            Platform = Platform,
+            PlayerId = PlayerId,
+            ProductId = ProductId,
+            TierKey = TierKey,
+            TierPrecedence = TierPrecedence,
+            Status = Status,
+            ActiveEconomyItemId = ActiveEconomyItemId,
+            AutoRenew = AutoRenew,
+            LatestStoreOrderId = LatestStoreOrderId,
+            IsSandbox = IsSandbox,
+            PeriodStartUtc = PeriodStartUtc,
+            PeriodEndUtc = PeriodEndUtc,
+            OriginalPurchaseDateUtc = OriginalPurchaseDateUtc,
+            LastEventAtUtc = LastEventAtUtc,
+            PendingTierKey = PendingTierKey,
+            PendingProductId = PendingProductId,
+            GracePeriodEndUtc = GracePeriodEndUtc,
+            CreatedAtUtc = CreatedAtUtc,
+            UpdatedAtUtc = UpdatedAtUtc
+        };
+        copy.SetActiveEconomyItemIds(ActiveEconomyItemIds);
+        return copy;
+    }
+
+    /// <summary>
     /// Creates a subscription key for Apple.
     /// </summary>
     public static string CreateAppleKey(string originalTransactionId)
@@ -136,10 +238,11 @@ public sealed class SubscriptionRecord
     /// </summary>
     public static string CreateGoogleKey(string purchaseToken)
     {
-        // Use first 64 chars of token as key (tokens can be very long)
-        var truncated = purchaseToken.Length > 64
-            ? purchaseToken[..64]
-            : purchaseToken;
-        return $"google:{truncated}";
+        ArgumentException.ThrowIfNullOrWhiteSpace(purchaseToken);
+
+        // Purchase tokens are bearer-like credentials. Keep the lookup deterministic
+        // without persisting the raw token as part of the subscription identifier.
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(purchaseToken));
+        return $"google:{Convert.ToHexString(hash)}";
     }
 }

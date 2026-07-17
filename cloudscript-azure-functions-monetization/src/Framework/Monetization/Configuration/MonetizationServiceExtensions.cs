@@ -78,19 +78,36 @@ public static class MonetizationServiceExtensions
         if (config.UseFakeVerifier)
         {
             services.AddSingleton<FakeStoreVerifier>();
+            // Keep the Function host resolvable in local fake-verifier mode without ever
+            // treating a fake store result as authoritative RTDN state.
+            services.AddSingleton<IGooglePlaySubscriptionSnapshotProvider,
+                DisabledGooglePlaySubscriptionSnapshotProvider>();
         }
         else
         {
-            services.AddSingleton(sp =>
-                new AppleStoreVerifier(
-                    config.ToAppleVerifierConfig(),
-                    sp.GetRequiredService<ILogger<AppleStoreVerifier>>(),
-                    jwsVerifier: sp.GetRequiredService<IAppleJwsVerifier>()));
+            if (config.Apple.Enabled)
+            {
+                services.AddSingleton(sp =>
+                    new AppleStoreVerifier(
+                        config.ToAppleVerifierConfig(),
+                        sp.GetRequiredService<ILogger<AppleStoreVerifier>>(),
+                        jwsVerifier: sp.GetRequiredService<IAppleJwsVerifier>()));
+            }
 
-            services.AddSingleton(sp =>
-                new GooglePlayStoreVerifier(
-                    config.ToGoogleVerifierConfig(),
-                    sp.GetRequiredService<ILogger<GooglePlayStoreVerifier>>()));
+            if (config.Google.Enabled)
+            {
+                services.AddSingleton(sp =>
+                    new GooglePlayStoreVerifier(
+                        config.ToGoogleVerifierConfig(),
+                        sp.GetRequiredService<ILogger<GooglePlayStoreVerifier>>()));
+                services.AddSingleton<IGooglePlaySubscriptionSnapshotProvider>(sp =>
+                    sp.GetRequiredService<GooglePlayStoreVerifier>());
+            }
+            else
+            {
+                services.AddSingleton<IGooglePlaySubscriptionSnapshotProvider,
+                    DisabledGooglePlaySubscriptionSnapshotProvider>();
+            }
         }
 
         // Entitlement granter
@@ -109,13 +126,25 @@ public static class MonetizationServiceExtensions
             if (config.UseFakeVerifier)
             {
                 var fake = sp.GetRequiredService<FakeStoreVerifier>();
-                appleVerifier = fake;
-                googleVerifier = fake;
+                appleVerifier = config.Apple.Enabled
+                    ? fake
+                    : new DisabledStoreVerifier(
+                        Serhat.Forge.CloudScript.Framework.Monetization.Domain.Platform.Apple);
+                googleVerifier = config.Google.Enabled
+                    ? fake
+                    : new DisabledStoreVerifier(
+                        Serhat.Forge.CloudScript.Framework.Monetization.Domain.Platform.Google);
             }
             else
             {
-                appleVerifier = sp.GetRequiredService<AppleStoreVerifier>();
-                googleVerifier = sp.GetRequiredService<GooglePlayStoreVerifier>();
+                appleVerifier = config.Apple.Enabled
+                    ? sp.GetRequiredService<AppleStoreVerifier>()
+                    : new DisabledStoreVerifier(
+                        Serhat.Forge.CloudScript.Framework.Monetization.Domain.Platform.Apple);
+                googleVerifier = config.Google.Enabled
+                    ? sp.GetRequiredService<GooglePlayStoreVerifier>()
+                    : new DisabledStoreVerifier(
+                        Serhat.Forge.CloudScript.Framework.Monetization.Domain.Platform.Google);
             }
 
             return new PurchaseVerificationService(
@@ -124,7 +153,8 @@ public static class MonetizationServiceExtensions
                 sp.GetRequiredService<IPurchaseRepository>(),
                 sp.GetRequiredService<IEntitlementGranter>(),
                 config.Products,
-                sp.GetRequiredService<ILogger<PurchaseVerificationService>>());
+                sp.GetRequiredService<ILogger<PurchaseVerificationService>>(),
+                enforceProductionSandboxPolicy: !config.IsDevelopment);
         });
 
         services.AddSingleton<SubscriptionLifecycleService>(sp =>
@@ -133,6 +163,12 @@ public static class MonetizationServiceExtensions
                 sp.GetRequiredService<IEntitlementGranter>(),
                 config.Products,
                 sp.GetRequiredService<ILogger<SubscriptionLifecycleService>>()));
+        services.AddSingleton<PurchaseRefundReconciliationService>(sp =>
+            new PurchaseRefundReconciliationService(
+                sp.GetRequiredService<IPurchaseRepository>(),
+                sp.GetRequiredService<IEntitlementGranter>(),
+                sp.GetRequiredService<SubscriptionLifecycleService>(),
+                sp.GetRequiredService<ILogger<PurchaseRefundReconciliationService>>()));
 
         // Webhook parsers
         services.AddSingleton(sp =>
@@ -149,6 +185,14 @@ public static class MonetizationServiceExtensions
             new GoogleRtdnParser(
                 googleRtdnConfig,
                 sp.GetRequiredService<ILogger<GoogleRtdnParser>>()));
+        services.AddSingleton(sp =>
+            new GoogleRtdnReconciliationService(
+                sp.GetRequiredService<IGooglePlaySubscriptionSnapshotProvider>(),
+                sp.GetRequiredService<IPurchaseRepository>(),
+                sp.GetRequiredService<SubscriptionLifecycleService>(),
+                sp.GetRequiredService<PurchaseRefundReconciliationService>(),
+                config.Google.RequireObfuscatedAccountId,
+                sp.GetRequiredService<ILogger<GoogleRtdnReconciliationService>>()));
 
         return services;
     }

@@ -130,11 +130,6 @@ public sealed class WebhookEvent
     public bool IsSandbox { get; set; }
 
     /// <summary>
-    /// Raw payload (stored for diagnostics).
-    /// </summary>
-    public string? RawPayload { get; set; }
-
-    /// <summary>
     /// New tier key for upgrade/downgrade.
     /// </summary>
     public string? NewTierKey { get; set; }
@@ -148,6 +143,35 @@ public sealed class WebhookEvent
     /// Raw payload for debugging (truncated, no sensitive data).
     /// </summary>
     public string? RawPayloadPreview { get; set; }
+
+    /// <summary>
+    /// Canonical identity for an entitlement side effect. Provider delivery IDs remain the
+    /// webhook claim identity; this value makes different deliveries of the same authoritative
+    /// store transition converge on one grant/revoke operation.
+    /// </summary>
+    public string? EntitlementOperationId { get; set; }
+
+    /// <summary>
+    /// Whether the signed store transaction is an auto-renewable subscription.
+    /// </summary>
+    public bool IsSubscription { get; set; }
+
+    /// <summary>
+    /// Apple-signed refund/revocation classification. This is retained as a bounded enum-like
+    /// string rather than raw signed payload data.
+    /// </summary>
+    public string? RevocationType { get; set; }
+
+    /// <summary>
+    /// Apple-signed refunded percentage in milliunits (100000 means 100%).
+    /// </summary>
+    public int? RevocationPercentage { get; set; }
+
+    /// <summary>
+    /// Whether the signed provider data proves a complete one-time refund/revocation.
+    /// Subscription refund notifications revoke access regardless of proration.
+    /// </summary>
+    public bool IsFullRefund { get; set; }
 }
 
 /// <summary>

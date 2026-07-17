@@ -1,4 +1,5 @@
-#if UNITY_PURCHASING
+#nullable enable
+
 using System.Threading.Tasks;
 using Serhat.Backend.Core;
 using Serhat.Backend.Monetization.Abstractions;
@@ -26,6 +27,9 @@ namespace Serhat.Backend.Monetization.Samples
         public UnityEngine.UI.Button? restoreButton;
         public UnityEngine.UI.Text? statusText;
 
+        [Tooltip("Local sample identity only. Production must use the authenticated PlayFab title-player ID.")]
+        public string localDevelopmentPlayerId = "local-development-player";
+
         private async void Start()
         {
             // Initialize the purchase service
@@ -41,10 +45,24 @@ namespace Serhat.Backend.Monetization.Samples
             await _purchaseService.InitializeAsync();
         }
 
+        private void OnDestroy()
+        {
+            if (_purchaseService is System.IDisposable disposable)
+            {
+                disposable.Dispose();
+            }
+
+            _purchaseService = null;
+        }
+
         private IPurchaseService CreatePurchaseService()
         {
             // 1. Create the store client (Unity IAP wrapper)
             var storeClient = new UnityIapStoreClient();
+            storeClient.SetGoogleObfuscatedAccountId(
+                StoreAccountIdentity.CreateGoogleObfuscatedAccountId(localDevelopmentPlayerId));
+            storeClient.SetAppleAppAccountToken(
+                StoreAccountIdentity.CreateAppleAppAccountToken(localDevelopmentPlayerId));
 
             // 2. Create the backend client
             // In a real app, you'd get the invoker from your existing backend SDK setup
@@ -61,9 +79,13 @@ namespace Serhat.Backend.Monetization.Samples
             var catalogMapping = new ExampleProductCatalog();
             var tierPolicy = new ExampleTierPolicy();
 
-            // 4. Create persistence
-            var storage = new PlayerPrefsStorage();
-            var clock = new SystemClock();
+            // 4. Create local-development persistence. FileStorage is plaintext;
+            // production games should inject protected/encrypted IStorage instead.
+            var storage = new FileStorage(System.IO.Path.Combine(
+                Application.persistentDataPath,
+                "serhat_forge",
+                "monetization"));
+            var clock = SystemClock.Instance;
             var pendingStore = new PendingPurchaseStore(storage, clock);
 
             // 5. Create the purchase service
@@ -316,4 +338,3 @@ namespace Serhat.Backend.Monetization.Samples
         }
     }
 }
-#endif

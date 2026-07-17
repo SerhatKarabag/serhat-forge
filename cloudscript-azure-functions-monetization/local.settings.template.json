@@ -8,6 +8,7 @@
     "PLAYFAB_TITLE_ID": "",
     "PLAYFAB_DEV_SECRET_KEY": "",
     "USE_FAKE_VERIFIER": "true",
+    "APPLE_STORE_ENABLED": "true",
     "APPLE_BUNDLE_ID": "",
     "APPLE_APP_ID": "",
     "APPLE_ISSUER_ID": "",
@@ -18,13 +19,16 @@
     "APPLE_CERTIFICATE_REVOCATION_MODE": "Online",
     "APPLE_MAX_NOTIFICATION_AGE_SECONDS": "604800",
     "APPLE_SKIP_SIGNATURE_VALIDATION": "false",
+    "APPLE_REQUIRE_APP_ACCOUNT_TOKEN": "false",
+    "GOOGLE_STORE_ENABLED": "true",
     "GOOGLE_PACKAGE_NAME": "",
     "GOOGLE_SERVICE_ACCOUNT_EMAIL": "",
     "GOOGLE_PRIVATE_KEY_BASE64": "",
     "GOOGLE_PUBSUB_AUDIENCE": "",
     "GOOGLE_PUBSUB_SERVICE_ACCOUNT_EMAIL": "",
     "GOOGLE_MAX_MESSAGE_AGE_SECONDS": "604800",
-    "ALLOWED_PRODUCTS_JSON": "{}",
+    "GOOGLE_REQUIRE_OBFUSCATED_ACCOUNT_ID": "false",
+    "ALLOWED_PRODUCTS_JSON": "{\"products\":{\"com.company.game.coins_100\":{\"productId\":\"com.company.game.coins_100\",\"type\":\"Consumable\",\"economyItemIds\":[\"currency_coins\"],\"quantity\":100,\"grantMetadata\":{\"source\":\"iap\"},\"enabled\":true}}}",
     "ALLOW_SANDBOX_IN_PRODUCTION": "false"
   }
 }

@@ -1,3 +1,7 @@
+#nullable enable
+
+using System;
+
 namespace Serhat.Backend.Monetization.Domain
 {
     /// <summary>
@@ -27,7 +31,7 @@ namespace Serhat.Backend.Monetization.Domain
         /// <summary>Type of product.</summary>
         public ProductType Type { get; }
 
-        /// <summary>For subscriptions: tier key for upgrade/downgrade logic.</summary>
+        /// <summary>For subscriptions: tier key for validation and project-specific replacement logic.</summary>
         public string? TierKey { get; }
 
         /// <summary>For subscriptions: tier precedence (higher = better tier).</summary>
@@ -43,6 +47,11 @@ namespace Serhat.Backend.Monetization.Domain
             int tierPrecedence = 0,
             string? metadata = null)
         {
+            if (string.IsNullOrWhiteSpace(productId))
+            {
+                throw new ArgumentException("Product ID is required.", nameof(productId));
+            }
+
             ProductId = productId;
             Type = type;
             TierKey = tierKey;

@@ -1,0 +1,18 @@
+{
+    "name": "Serhat.BackendSdk.Monetization.UnityIap",
+    "rootNamespace": "Serhat.Backend.Monetization.Store",
+    "references": [
+        "Serhat.BackendSdk.Monetization",
+        "Unity.Purchasing",
+        "Unity.Purchasing.Stores"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

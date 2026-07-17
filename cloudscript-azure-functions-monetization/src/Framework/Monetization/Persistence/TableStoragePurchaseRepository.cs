@@ -50,6 +50,27 @@ public sealed class TableStoragePurchaseRepository : IPurchaseRepository
         _webhooksTable.CreateIfNotExists();
     }
 
+    /// <summary>
+    /// Creates a repository over preconfigured table clients. Useful for sovereign/custom
+    /// endpoints and deterministic concurrency tests; callers own client provisioning.
+    /// </summary>
+    public TableStoragePurchaseRepository(
+        TableClient purchasesTable,
+        TableClient subscriptionsTable,
+        TableClient webhooksTable,
+        string titleId,
+        ILogger<TableStoragePurchaseRepository> logger)
+    {
+        _purchasesTable = purchasesTable ?? throw new ArgumentNullException(nameof(purchasesTable));
+        _subscriptionsTable = subscriptionsTable ??
+                              throw new ArgumentNullException(nameof(subscriptionsTable));
+        _webhooksTable = webhooksTable ?? throw new ArgumentNullException(nameof(webhooksTable));
+        _titleId = !string.IsNullOrWhiteSpace(titleId)
+            ? titleId
+            : throw new ArgumentException("Title ID is required", nameof(titleId));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+
     #region Purchase Records
 
     public async Task<PurchaseRecord?> GetPurchaseAsync(string transactionKey, CancellationToken ct = default)
@@ -99,6 +120,189 @@ public sealed class TableStoragePurchaseRepository : IPurchaseRepository
         catch (RequestFailedException ex) when (ex.Status == 404)
         {
             _logger.LogWarning("Purchase record was not found for update");
+            return false;
+        }
+    }
+
+    public async Task<PurchaseClaimResult> TryClaimPurchaseAsync(
+        PurchaseRecord candidate,
+        string leaseId,
+        DateTime nowUtc,
+        TimeSpan leaseDuration,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseId);
+
+        var (partitionKey, rowKey) = GetPurchaseKeys(candidate.TransactionKey);
+        const int maxOptimisticAttempts = 5;
+
+        for (var attempt = 0; attempt < maxOptimisticAttempts; attempt++)
+        {
+            PurchaseEntity? existingEntity = null;
+            try
+            {
+                var response = await _purchasesTable.GetEntityAsync<PurchaseEntity>(
+                    partitionKey,
+                    rowKey,
+                    cancellationToken: ct);
+                existingEntity = response.Value;
+            }
+            catch (RequestFailedException ex) when (ex.Status == 404)
+            {
+                var created = candidate.Copy();
+                created.AcquireProcessingLease(leaseId, nowUtc, leaseDuration);
+                var createdEntity = PurchaseEntity.FromRecord(created, _titleId);
+                (createdEntity.PartitionKey, createdEntity.RowKey) = (partitionKey, rowKey);
+
+                try
+                {
+                    await _purchasesTable.AddEntityAsync(createdEntity, ct);
+                    return new PurchaseClaimResult(true, created);
+                }
+                catch (RequestFailedException createException) when (createException.Status == 409)
+                {
+                    continue;
+                }
+            }
+
+            if (existingEntity == null)
+            {
+                continue;
+            }
+
+            var existing = existingEntity.ToRecord();
+            if (!existing.HasSameImmutableIdentity(candidate) ||
+                !existing.CanAcquireProcessingLease(nowUtc))
+            {
+                return new PurchaseClaimResult(false, existing);
+            }
+
+            var claimed = existing.Copy();
+            claimed.AcquireProcessingLease(leaseId, nowUtc, leaseDuration);
+            var claimedEntity = PurchaseEntity.FromRecord(claimed, _titleId);
+            (claimedEntity.PartitionKey, claimedEntity.RowKey) = (partitionKey, rowKey);
+
+            try
+            {
+                await _purchasesTable.UpdateEntityAsync(
+                    claimedEntity,
+                    existingEntity.ETag,
+                    TableUpdateMode.Replace,
+                    ct);
+                return new PurchaseClaimResult(true, claimed);
+            }
+            catch (RequestFailedException ex) when (ex.Status is 409 or 412)
+            {
+                // Another worker changed the lease. Re-read and classify its state.
+            }
+        }
+
+        var current = await GetPurchaseAsync(candidate.TransactionKey, ct);
+        return new PurchaseClaimResult(
+            false,
+            current ?? throw new InvalidOperationException(
+                "Purchase claim contention ended without a durable purchase record."));
+    }
+
+    public async Task<bool> TryUpdatePurchaseAsync(
+        PurchaseRecord record,
+        string expectedLeaseId,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedLeaseId);
+
+        var (partitionKey, rowKey) = GetPurchaseKeys(record.TransactionKey);
+        PurchaseEntity currentEntity;
+        try
+        {
+            var response = await _purchasesTable.GetEntityAsync<PurchaseEntity>(
+                partitionKey,
+                rowKey,
+                cancellationToken: ct);
+            currentEntity = response.Value;
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return false;
+        }
+
+        var current = currentEntity.ToRecord();
+        if (!string.Equals(
+                current.ProcessingLeaseId,
+                expectedLeaseId,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var updatedEntity = PurchaseEntity.FromRecord(record, _titleId);
+        (updatedEntity.PartitionKey, updatedEntity.RowKey) = (partitionKey, rowKey);
+
+        try
+        {
+            await _purchasesTable.UpdateEntityAsync(
+                updatedEntity,
+                currentEntity.ETag,
+                TableUpdateMode.Replace,
+                ct);
+            return true;
+        }
+        catch (RequestFailedException ex) when (ex.Status is 404 or 409 or 412)
+        {
+            return false;
+        }
+    }
+
+    public async Task<bool> TryRenewPurchaseLeaseAsync(
+        string transactionKey,
+        string expectedLeaseId,
+        DateTime nowUtc,
+        TimeSpan leaseDuration,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(transactionKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedLeaseId);
+
+        var (partitionKey, rowKey) = GetPurchaseKeys(transactionKey);
+        PurchaseEntity currentEntity;
+        try
+        {
+            var response = await _purchasesTable.GetEntityAsync<PurchaseEntity>(
+                partitionKey,
+                rowKey,
+                cancellationToken: ct);
+            currentEntity = response.Value;
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return false;
+        }
+
+        var renewed = currentEntity.ToRecord();
+        if (!renewed.TryRenewProcessingLease(
+                expectedLeaseId,
+                nowUtc,
+                leaseDuration))
+        {
+            return false;
+        }
+
+        var renewedEntity = PurchaseEntity.FromRecord(renewed, _titleId);
+        (renewedEntity.PartitionKey, renewedEntity.RowKey) = (partitionKey, rowKey);
+
+        try
+        {
+            await _purchasesTable.UpdateEntityAsync(
+                renewedEntity,
+                currentEntity.ETag,
+                TableUpdateMode.Replace,
+                ct);
+            return true;
+        }
+        catch (RequestFailedException ex) when (ex.Status is 404 or 409 or 412)
+        {
             return false;
         }
     }
@@ -190,6 +394,58 @@ public sealed class TableStoragePurchaseRepository : IPurchaseRepository
             _logger.LogWarning("Subscription record was not found for update");
             return false;
         }
+    }
+
+    public async Task<bool> TryUpdateSubscriptionIfNotNewerAsync(
+        SubscriptionRecord record,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        var (partitionKey, rowKey) = GetSubscriptionKeys(record.SubscriptionKey);
+
+        // A parallel provider call can finish after another webhook commits. Re-read and use
+        // the entity ETag so that the older candidate never wins through a wildcard replace.
+        const int maxAttempts = 3;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            try
+            {
+                var response = await _subscriptionsTable.GetEntityAsync<SubscriptionEntity>(
+                    partitionKey,
+                    rowKey,
+                    cancellationToken: ct);
+                var durable = response.Value;
+                if (durable.LastEventAtUtc > record.LastEventAtUtc ||
+                    durable.LastEventAtUtc == record.LastEventAtUtc &&
+                    durable.PeriodEndUtc > record.PeriodEndUtc)
+                {
+                    return true;
+                }
+
+                var candidate = SubscriptionEntity.FromRecord(record, _titleId);
+                candidate.PartitionKey = partitionKey;
+                candidate.RowKey = rowKey;
+                await _subscriptionsTable.UpdateEntityAsync(
+                    candidate,
+                    durable.ETag,
+                    TableUpdateMode.Replace,
+                    ct);
+                return true;
+            }
+            catch (RequestFailedException error) when (error.Status == 404)
+            {
+                return false;
+            }
+            catch (RequestFailedException error) when (error.Status == 412)
+            {
+                // The next iteration observes the winner and either accepts this newer
+                // candidate or treats it as a successfully ignored stale event.
+            }
+        }
+
+        _logger.LogWarning(
+            "Subscription conditional update exhausted concurrency retries");
+        return false;
     }
 
     public async Task<IReadOnlyList<SubscriptionRecord>> GetSubscriptionsByPlayerAsync(
@@ -370,6 +626,11 @@ public sealed class PurchaseEntity : ITableEntity
     public string? GrantedEconomyItemIdsJson { get; set; }
     public int QuantityGranted { get; set; }
     public string? TierKey { get; set; }
+    public bool HasGrantPayloadSnapshot { get; set; }
+    public string? GrantEconomyItemIdsJson { get; set; }
+    public string? GrantQuantitiesJson { get; set; }
+    public string? GrantMetadataJson { get; set; }
+    public int TierPrecedence { get; set; }
     public string? CachedResponseJson { get; set; }
     public string? ErrorCode { get; set; }
     public string? ErrorMessage { get; set; }
@@ -377,6 +638,20 @@ public sealed class PurchaseEntity : ITableEntity
     public DateTime UpdatedAtUtc { get; set; }
     public string StoreTransactionId { get; set; } = string.Empty;
     public string? OriginalTransactionId { get; set; }
+    public string? ProcessingLeaseId { get; set; }
+    public DateTime? ProcessingLeaseExpiresAtUtc { get; set; }
+    public DateTime? NextRetryAtUtc { get; set; }
+    public bool IsRetryable { get; set; }
+    public int AttemptCount { get; set; }
+    public DateTime? FirstGrantAttemptAtUtc { get; set; }
+    public bool HasGrantAttemptTracking { get; set; }
+    public bool HasStoreVerificationSnapshot { get; set; }
+    public DateTime? StorePurchaseDateUtc { get; set; }
+    public DateTime? StoreExpirationDateUtc { get; set; }
+    public string? StoreSubscriptionStatus { get; set; }
+    public bool? StoreAutoRenew { get; set; }
+    public bool StoreIsSandbox { get; set; }
+    public DateTime? StoreGracePeriodEndUtc { get; set; }
 
     public static PurchaseEntity FromRecord(PurchaseRecord record, string titleId)
     {
@@ -395,13 +670,38 @@ public sealed class PurchaseEntity : ITableEntity
                 : null,
             QuantityGranted = record.QuantityGranted,
             TierKey = record.TierKey,
+            HasGrantPayloadSnapshot = record.HasGrantPayloadSnapshot,
+            GrantEconomyItemIdsJson = record.GrantEconomyItemIds.Count > 0
+                ? JsonSerializer.Serialize(record.GrantEconomyItemIds)
+                : null,
+            GrantQuantitiesJson = record.GrantQuantities is { Count: > 0 }
+                ? JsonSerializer.Serialize(record.GrantQuantities)
+                : null,
+            GrantMetadataJson = record.GrantMetadata is { Count: > 0 }
+                ? JsonSerializer.Serialize(record.GrantMetadata)
+                : null,
+            TierPrecedence = record.TierPrecedence,
             CachedResponseJson = record.CachedResponseJson,
             ErrorCode = record.ErrorCode,
             ErrorMessage = record.ErrorMessage,
             CreatedAtUtc = record.CreatedAtUtc,
             UpdatedAtUtc = record.UpdatedAtUtc,
             StoreTransactionId = record.StoreTransactionId,
-            OriginalTransactionId = record.OriginalTransactionId
+            OriginalTransactionId = record.OriginalTransactionId,
+            ProcessingLeaseId = record.ProcessingLeaseId,
+            ProcessingLeaseExpiresAtUtc = record.ProcessingLeaseExpiresAtUtc,
+            NextRetryAtUtc = record.NextRetryAtUtc,
+            IsRetryable = record.IsRetryable,
+            AttemptCount = record.AttemptCount,
+            FirstGrantAttemptAtUtc = record.FirstGrantAttemptAtUtc,
+            HasGrantAttemptTracking = record.HasGrantAttemptTracking,
+            HasStoreVerificationSnapshot = record.HasStoreVerificationSnapshot,
+            StorePurchaseDateUtc = record.StorePurchaseDateUtc,
+            StoreExpirationDateUtc = record.StoreExpirationDateUtc,
+            StoreSubscriptionStatus = record.StoreSubscriptionStatus?.ToString(),
+            StoreAutoRenew = record.StoreAutoRenew,
+            StoreIsSandbox = record.StoreIsSandbox,
+            StoreGracePeriodEndUtc = record.StoreGracePeriodEndUtc
         };
     }
 
@@ -420,13 +720,42 @@ public sealed class PurchaseEntity : ITableEntity
                 : new List<string>(),
             QuantityGranted = QuantityGranted,
             TierKey = TierKey,
+            HasGrantPayloadSnapshot = HasGrantPayloadSnapshot,
+            GrantEconomyItemIds = !string.IsNullOrEmpty(GrantEconomyItemIdsJson)
+                ? JsonSerializer.Deserialize<List<string>>(GrantEconomyItemIdsJson) ?? new List<string>()
+                : new List<string>(),
+            GrantQuantities = !string.IsNullOrEmpty(GrantQuantitiesJson)
+                ? JsonSerializer.Deserialize<List<int>>(GrantQuantitiesJson)
+                : null,
+            GrantMetadata = !string.IsNullOrEmpty(GrantMetadataJson)
+                ? JsonSerializer.Deserialize<Dictionary<string, string>>(GrantMetadataJson)
+                : null,
+            TierPrecedence = TierPrecedence,
             CachedResponseJson = CachedResponseJson,
             ErrorCode = ErrorCode,
             ErrorMessage = ErrorMessage,
             CreatedAtUtc = CreatedAtUtc,
             UpdatedAtUtc = UpdatedAtUtc,
             StoreTransactionId = StoreTransactionId,
-            OriginalTransactionId = OriginalTransactionId
+            OriginalTransactionId = OriginalTransactionId,
+            ProcessingLeaseId = ProcessingLeaseId,
+            ProcessingLeaseExpiresAtUtc = ProcessingLeaseExpiresAtUtc,
+            NextRetryAtUtc = NextRetryAtUtc,
+            IsRetryable = IsRetryable,
+            AttemptCount = AttemptCount,
+            FirstGrantAttemptAtUtc = FirstGrantAttemptAtUtc,
+            HasGrantAttemptTracking = HasGrantAttemptTracking,
+            HasStoreVerificationSnapshot = HasStoreVerificationSnapshot,
+            StorePurchaseDateUtc = StorePurchaseDateUtc,
+            StoreExpirationDateUtc = StoreExpirationDateUtc,
+            StoreSubscriptionStatus = Enum.TryParse<SubscriptionStatus>(
+                StoreSubscriptionStatus,
+                out var subscriptionStatus)
+                ? subscriptionStatus
+                : null,
+            StoreAutoRenew = StoreAutoRenew,
+            StoreIsSandbox = StoreIsSandbox,
+            StoreGracePeriodEndUtc = StoreGracePeriodEndUtc
         };
     }
 }
@@ -449,7 +778,10 @@ public sealed class SubscriptionEntity : ITableEntity
     public int TierPrecedence { get; set; }
     public string Status { get; set; } = string.Empty;
     public string? ActiveEconomyItemId { get; set; }
+    public string? ActiveEconomyItemIdsJson { get; set; }
     public bool AutoRenew { get; set; }
+    public string? LatestStoreOrderId { get; set; }
+    public bool IsSandbox { get; set; }
     public DateTime PeriodStartUtc { get; set; }
     public DateTime PeriodEndUtc { get; set; }
     public DateTime OriginalPurchaseDateUtc { get; set; }
@@ -477,7 +809,10 @@ public sealed class SubscriptionEntity : ITableEntity
             TierPrecedence = record.TierPrecedence,
             Status = record.Status.ToString(),
             ActiveEconomyItemId = record.ActiveEconomyItemId,
+            ActiveEconomyItemIdsJson = JsonSerializer.Serialize(record.ActiveEconomyItemIds),
             AutoRenew = record.AutoRenew,
+            LatestStoreOrderId = record.LatestStoreOrderId,
+            IsSandbox = record.IsSandbox,
             PeriodStartUtc = record.PeriodStartUtc,
             PeriodEndUtc = record.PeriodEndUtc,
             OriginalPurchaseDateUtc = record.OriginalPurchaseDateUtc,
@@ -492,7 +827,7 @@ public sealed class SubscriptionEntity : ITableEntity
 
     public SubscriptionRecord ToRecord()
     {
-        return new SubscriptionRecord
+        var record = new SubscriptionRecord
         {
             SubscriptionKey = SubscriptionKey,
             Platform = Platform,
@@ -503,6 +838,8 @@ public sealed class SubscriptionEntity : ITableEntity
             Status = Enum.Parse<SubscriptionStatus>(Status),
             ActiveEconomyItemId = ActiveEconomyItemId,
             AutoRenew = AutoRenew,
+            LatestStoreOrderId = LatestStoreOrderId,
+            IsSandbox = IsSandbox,
             PeriodStartUtc = PeriodStartUtc,
             PeriodEndUtc = PeriodEndUtc,
             OriginalPurchaseDateUtc = OriginalPurchaseDateUtc,
@@ -513,6 +850,22 @@ public sealed class SubscriptionEntity : ITableEntity
             CreatedAtUtc = CreatedAtUtc,
             UpdatedAtUtc = UpdatedAtUtc
         };
+
+        if (!string.IsNullOrWhiteSpace(ActiveEconomyItemIdsJson))
+        {
+            try
+            {
+                record.SetActiveEconomyItemIds(
+                    JsonSerializer.Deserialize<List<string>>(ActiveEconomyItemIdsJson));
+            }
+            catch (JsonException)
+            {
+                // Preserve compatibility with the legacy single-item column when a
+                // partially migrated or malformed snapshot is encountered.
+            }
+        }
+
+        return record;
     }
 }
 

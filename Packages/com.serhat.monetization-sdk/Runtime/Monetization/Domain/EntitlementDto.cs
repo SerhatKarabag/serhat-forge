@@ -1,3 +1,5 @@
+#nullable enable
+
 using System;
 using System.Collections.Generic;
 
@@ -9,8 +11,22 @@ namespace Serhat.Backend.Monetization.Domain
     /// </summary>
     public sealed class EntitlementDto
     {
+        private string _itemId = string.Empty;
+        private string _stackId = "default";
+
         /// <summary>Economy item ID in PlayFab catalog.</summary>
-        public string ItemId { get; set; } = string.Empty;
+        public string ItemId
+        {
+            get => _itemId;
+            set => _itemId = value ?? string.Empty;
+        }
+
+        /// <summary>PlayFab Economy v2 inventory stack ID.</summary>
+        public string StackId
+        {
+            get => _stackId;
+            set => _stackId = string.IsNullOrWhiteSpace(value) ? "default" : value;
+        }
 
         /// <summary>Display name if available.</summary>
         public string? DisplayName { get; set; }
@@ -22,7 +38,10 @@ namespace Serhat.Backend.Monetization.Domain
         public ProductType ProductType { get; set; }
 
         /// <summary>For consumables: current quantity owned.</summary>
-        public int Quantity { get; set; } = 1;
+        public long Quantity { get; set; } = 1;
+
+        /// <summary>Optional UTC expiry for time-limited inventory stacks.</summary>
+        public DateTime? ExpiresAtUtc { get; set; }
 
         /// <summary>When this entitlement was granted.</summary>
         public DateTime GrantedAtUtc { get; set; }
@@ -36,8 +55,14 @@ namespace Serhat.Backend.Monetization.Domain
     /// </summary>
     public sealed class EntitlementsResponse
     {
+        private List<EntitlementDto> _entitlements = new();
+
         /// <summary>All active entitlements.</summary>
-        public List<EntitlementDto> Entitlements { get; set; } = new();
+        public List<EntitlementDto> Entitlements
+        {
+            get => _entitlements;
+            set => _entitlements = value ?? new List<EntitlementDto>();
+        }
 
         /// <summary>Active subscription if any.</summary>
         public SubscriptionDto? ActiveSubscription { get; set; }

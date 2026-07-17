@@ -12,4 +12,4 @@ Serhat Forge is an open technical community. Participation requires respectful, 
 
 Harassment, threats, discriminatory language, deliberate disruption, doxxing, and publication of private security reports or credentials are not tolerated.
 
-Maintainers may edit or remove content, close contributions, or restrict participation when necessary to protect the community. Report conduct concerns privately through a verified maintainer contact; do not use a public issue when the report contains personal or sensitive information.
+Maintainers may edit or remove content, close contributions, or restrict participation when necessary to protect the community. Use GitHub's private content-reporting controls or a private maintainer channel for conduct concerns. Do not use a public issue when a report contains personal or sensitive information. A public repository must publish a working private contact route before accepting community participation.

@@ -1,6 +1,9 @@
 using System;
+using System.Globalization;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -15,7 +18,10 @@ namespace Serhat.Forge.CloudScript.Framework.Monetization.Verification;
 /// Google Play Developer API verifier.
 /// Uses service account authentication.
 /// </summary>
-public sealed class GooglePlayStoreVerifier : IStoreVerifier, IDisposable
+public sealed class GooglePlayStoreVerifier :
+    IStoreVerifier,
+    IGooglePlaySubscriptionSnapshotProvider,
+    IDisposable
 {
     public string Platform => Domain.Platform.Google;
 
@@ -46,8 +52,11 @@ public sealed class GooglePlayStoreVerifier : IStoreVerifier, IDisposable
         {
             var accessToken = await GetAccessTokenAsync(ct);
 
-            var packageName = request.PackageName ?? _config.PackageName;
-            var url = $"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{packageName}/purchases/products/{request.ProductId}/tokens/{request.ReceiptPayload}";
+            var escapedPackageName = Uri.EscapeDataString(_config.PackageName);
+            var escapedProductId = Uri.EscapeDataString(request.ProductId);
+            var escapedPurchaseToken = Uri.EscapeDataString(request.ReceiptPayload);
+            var url =
+                $"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{escapedPackageName}/purchases/products/{escapedProductId}/tokens/{escapedPurchaseToken}";
 
             using var httpRequest = new HttpRequestMessage(HttpMethod.Get, url);
             httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
@@ -56,33 +65,78 @@ public sealed class GooglePlayStoreVerifier : IStoreVerifier, IDisposable
 
             if (!response.IsSuccessStatusCode)
             {
-                var errorBody = await response.Content.ReadAsStringAsync(ct);
-                _logger.LogWarning("Google API error: {Status}",
-                    response.StatusCode);
-
-                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-                {
-                    return VerificationResult.InvalidReceipt("Purchase not found");
-                }
-
-                return VerificationResult.StoreError($"Google API error: {response.StatusCode}");
+                _logger.LogWarning(
+                    "Google products API returned {StatusCode}",
+                    (int)response.StatusCode);
+                return ClassifyVerificationHttpFailure(response.StatusCode);
             }
 
             var responseBody = await response.Content.ReadAsStringAsync(ct);
-            var purchase = JsonDocument.Parse(responseBody).RootElement;
+            using var purchaseDocument = JsonDocument.Parse(responseBody);
+            var purchase = purchaseDocument.RootElement;
 
             // Check purchase state
             var purchaseState = purchase.GetProperty("purchaseState").GetInt32();
-            if (purchaseState != 0) // 0 = Purchased
+            if (purchaseState == 2) // Pending payment; Google may complete it later.
+            {
+                return VerificationResult.Retryable(
+                    "PURCHASE_PENDING",
+                    "The Google Play purchase is still pending");
+            }
+
+            if (purchaseState != 0) // 0 = Purchased, 1 = Cancelled
             {
                 return VerificationResult.Invalid("PURCHASE_NOT_COMPLETED",
                     $"Purchase state is {purchaseState}, expected 0 (Purchased)");
             }
 
-            // Check consumption state for consumables
-            var consumptionState = purchase.TryGetProperty("consumptionState", out var cs)
-                ? cs.GetInt32()
-                : 0;
+            var verifiedProductId = ReadOptionalString(purchase, "productId");
+            if (!string.IsNullOrWhiteSpace(verifiedProductId) &&
+                !string.Equals(verifiedProductId, request.ProductId, StringComparison.Ordinal))
+            {
+                return VerificationResult.ProductMismatch(request.ProductId, verifiedProductId);
+            }
+
+            var verifiedPurchaseToken = ReadOptionalString(purchase, "purchaseToken");
+            if (!string.IsNullOrWhiteSpace(verifiedPurchaseToken) &&
+                !string.Equals(
+                    verifiedPurchaseToken,
+                    request.ReceiptPayload,
+                    StringComparison.Ordinal))
+            {
+                return VerificationResult.InvalidReceipt(
+                    "Google Play returned a different purchase token");
+            }
+
+            var quantity = purchase.TryGetProperty("quantity", out var quantityElement)
+                ? quantityElement.GetInt32()
+                : 1;
+            if (quantity != 1)
+            {
+                return VerificationResult.Invalid(
+                    "UNSUPPORTED_PURCHASE_QUANTITY",
+                    "Multi-quantity Google Play purchases require explicit grant scaling");
+            }
+
+            var refundableQuantity = purchase.TryGetProperty(
+                "refundableQuantity",
+                out var refundableQuantityElement)
+                ? refundableQuantityElement.GetInt32()
+                : quantity;
+            if (refundableQuantity != quantity)
+            {
+                return VerificationResult.Invalid(
+                    "PURCHASE_REFUNDED",
+                    "Google Play reports a partially or fully refunded purchase");
+            }
+
+            var accountBindingFailure = ValidateAccountBinding(
+                request,
+                ReadOptionalString(purchase, "obfuscatedExternalAccountId"));
+            if (accountBindingFailure != null)
+            {
+                return accountBindingFailure;
+            }
 
             return VerificationResult.Valid() with
             {
@@ -90,18 +144,30 @@ public sealed class GooglePlayStoreVerifier : IStoreVerifier, IDisposable
                 TransactionId = purchase.TryGetProperty("orderId", out var oid)
                     ? oid.GetString()
                     : request.TransactionId,
-                PurchaseDateUtc = purchase.TryGetProperty("purchaseTimeMillis", out var pt)
-                    ? DateTimeOffset.FromUnixTimeMilliseconds(pt.GetInt64()).UtcDateTime
+                PurchaseDateUtc = TryReadUnixMilliseconds(
+                    purchase,
+                    "purchaseTimeMillis",
+                    out var purchaseDateUtc)
+                    ? purchaseDateUtc
                     : DateTime.UtcNow,
                 IsSubscription = false,
                 IsSandbox = purchase.TryGetProperty("purchaseType", out var ptype) &&
                            ptype.GetInt32() == 0 // 0 = Test
             };
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Google verification failed for product {ProductId}", request.ProductId);
-            return VerificationResult.StoreError(ex.Message);
+            // Exception messages from HttpClient can contain the request URI, which embeds
+            // the Google purchase token. Log only the type and return an opaque message.
+            _logger.LogError(
+                "Google verification failed for product {ProductId}: {ErrorType}",
+                request.ProductId,
+                ex.GetType().Name);
+            return VerificationResult.StoreError("Google verification is temporarily unavailable");
         }
     }
 
@@ -109,111 +175,476 @@ public sealed class GooglePlayStoreVerifier : IStoreVerifier, IDisposable
         VerifyRequest request,
         CancellationToken ct = default)
     {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var query = await QuerySubscriptionAsync(request.ReceiptPayload, ct)
+            .ConfigureAwait(false);
+        if (!query.IsSuccess)
+        {
+            return query.Failure == GooglePlaySubscriptionQueryFailure.Retryable
+                ? VerificationResult.Retryable(
+                    query.ErrorCode ?? "STORE_ERROR",
+                    query.ErrorMessage ?? "Google verification is temporarily unavailable")
+                : VerificationResult.Invalid(
+                    query.ErrorCode ?? "INVALID_RECEIPT",
+                    query.ErrorMessage ?? "Google Play rejected the purchase token");
+        }
+
+        var snapshot = query.Snapshot!;
+        if (!string.Equals(snapshot.ProductId, request.ProductId, StringComparison.Ordinal))
+        {
+            return VerificationResult.ProductMismatch(request.ProductId, snapshot.ProductId);
+        }
+
+        if (snapshot.State == GooglePlaySubscriptionState.Pending)
+        {
+            return VerificationResult.Retryable(
+                "PURCHASE_PENDING",
+                "The Google Play subscription payment is still pending");
+        }
+
+        if (snapshot.State is GooglePlaySubscriptionState.Paused or
+            GooglePlaySubscriptionState.OnHold or
+            GooglePlaySubscriptionState.Expired or
+            GooglePlaySubscriptionState.PendingPurchaseCanceled)
+        {
+            return VerificationResult.Invalid(
+                "SUBSCRIPTION_INACTIVE",
+                $"The Google Play subscription is {snapshot.State}");
+        }
+
+        if (snapshot.State == GooglePlaySubscriptionState.Unspecified)
+        {
+            return VerificationResult.Retryable(
+                "UNKNOWN_SUBSCRIPTION_STATE",
+                "Google Play returned an unsupported subscription state");
+        }
+
+        var accountBindingFailure = ValidateAccountBinding(request, snapshot);
+        if (accountBindingFailure != null)
+        {
+            return accountBindingFailure;
+        }
+
+        if (snapshot.StartTimeUtc == null || snapshot.ExpiryTimeUtc == null)
+        {
+            return VerificationResult.Invalid(
+                "MALFORMED_STORE_RESPONSE",
+                "Google Play omitted required subscription timestamps");
+        }
+
+        var status = snapshot.State switch
+        {
+            GooglePlaySubscriptionState.Active => SubscriptionStatus.Active,
+            GooglePlaySubscriptionState.InGracePeriod => SubscriptionStatus.GracePeriod,
+            GooglePlaySubscriptionState.Canceled => SubscriptionStatus.Cancelled,
+            _ => SubscriptionStatus.None
+        };
+
+        if (status == SubscriptionStatus.None)
+        {
+            return VerificationResult.Invalid(
+                "SUBSCRIPTION_INACTIVE",
+                $"The Google Play subscription is {snapshot.State}");
+        }
+
+        if (snapshot.State == GooglePlaySubscriptionState.Canceled &&
+            snapshot.ExpiryTimeUtc.Value <= DateTime.UtcNow)
+        {
+            return VerificationResult.Invalid(
+                "SUBSCRIPTION_INACTIVE",
+                "The canceled Google Play subscription has expired");
+        }
+
+        return VerificationResult.Valid() with
+        {
+            ProductId = snapshot.ProductId,
+            TransactionId = snapshot.LatestSuccessfulOrderId ?? request.TransactionId,
+            PurchaseDateUtc = snapshot.StartTimeUtc,
+            ExpirationDateUtc = snapshot.ExpiryTimeUtc,
+            IsSubscription = true,
+            SubscriptionStatus = status,
+            AutoRenew = snapshot.AutoRenewEnabled,
+            IsSandbox = snapshot.IsTestPurchase,
+            GracePeriodEndUtc = status == SubscriptionStatus.GracePeriod
+                ? snapshot.ExpiryTimeUtc
+                : null
+        };
+    }
+
+    public async Task<GooglePlaySubscriptionQueryResult> QuerySubscriptionAsync(
+        string purchaseToken,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(purchaseToken))
+        {
+            return GooglePlaySubscriptionQueryResult.Permanent(
+                "INVALID_RECEIPT",
+                "A Google Play purchase token is required");
+        }
+
         try
         {
-            var accessToken = await GetAccessTokenAsync(ct);
-
-            var packageName = request.PackageName ?? _config.PackageName;
-            var url = $"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{packageName}/purchases/subscriptions/{request.ProductId}/tokens/{request.ReceiptPayload}";
+            var accessToken = await GetAccessTokenAsync(ct).ConfigureAwait(false);
+            var escapedPackageName = Uri.EscapeDataString(_config.PackageName);
+            var escapedPurchaseToken = Uri.EscapeDataString(purchaseToken);
+            var url =
+                $"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{escapedPackageName}/purchases/subscriptionsv2/tokens/{escapedPurchaseToken}";
 
             using var httpRequest = new HttpRequestMessage(HttpMethod.Get, url);
             httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
 
-            using var response = await _httpClient.SendAsync(httpRequest, ct);
-
+            using var response = await _httpClient.SendAsync(httpRequest, ct)
+                .ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
-                var errorBody = await response.Content.ReadAsStringAsync(ct);
-                _logger.LogWarning("Google subscription API error: {Status}",
-                    response.StatusCode);
-
-                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-                {
-                    return VerificationResult.InvalidReceipt("Subscription not found");
-                }
-
-                return VerificationResult.StoreError($"Google API error: {response.StatusCode}");
+                _logger.LogWarning(
+                    "Google subscriptionsv2 API returned {StatusCode}",
+                    (int)response.StatusCode);
+                return ClassifySubscriptionHttpFailure(response.StatusCode);
             }
 
-            var responseBody = await response.Content.ReadAsStringAsync(ct);
-            var subscription = JsonDocument.Parse(responseBody).RootElement;
-
-            // Extract expiry time
-            var expiryTimeMillis = subscription.GetProperty("expiryTimeMillis").GetInt64();
-            var expiryDate = DateTimeOffset.FromUnixTimeMilliseconds(expiryTimeMillis).UtcDateTime;
-
-            // Determine status
-            var status = DetermineSubscriptionStatus(subscription, expiryDate);
-
-            return VerificationResult.Valid() with
-            {
-                ProductId = request.ProductId,
-                TransactionId = subscription.TryGetProperty("orderId", out var oid)
-                    ? oid.GetString()
-                    : request.TransactionId,
-                PurchaseDateUtc = subscription.TryGetProperty("startTimeMillis", out var st)
-                    ? DateTimeOffset.FromUnixTimeMilliseconds(st.GetInt64()).UtcDateTime
-                    : DateTime.UtcNow,
-                ExpirationDateUtc = expiryDate,
-                IsSubscription = true,
-                SubscriptionStatus = status,
-                AutoRenew = subscription.TryGetProperty("autoRenewing", out var ar) && ar.GetBoolean(),
-                IsSandbox = subscription.TryGetProperty("purchaseType", out var ptype) &&
-                           ptype.GetInt32() == 0,
-                GracePeriodEndUtc = subscription.TryGetProperty("obfuscatedExternalAccountId", out _)
-                    ? null  // Would need additional logic for grace period
-                    : null
-            };
+            var responseBody = await response.Content.ReadAsStringAsync(ct)
+                .ConfigureAwait(false);
+            return ParseSubscriptionSnapshot(responseBody);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Google subscription verification failed for product {ProductId}",
-                request.ProductId);
-            return VerificationResult.StoreError(ex.Message);
+            // HttpClient exceptions may include the request URI. Never attach the
+            // exception or its message because that URI contains the purchase token.
+            _logger.LogError(
+                "Google subscriptionsv2 query failed: {ErrorType}",
+                ex.GetType().Name);
+            return GooglePlaySubscriptionQueryResult.Retryable(
+                "STORE_ERROR",
+                "Google verification is temporarily unavailable");
         }
     }
 
-    private SubscriptionStatus DetermineSubscriptionStatus(JsonElement subscription, DateTime expiryDate)
+    private VerificationResult? ValidateAccountBinding(
+        VerifyRequest request,
+        GooglePlaySubscriptionSnapshot snapshot)
     {
-        // Check for cancellation
-        if (subscription.TryGetProperty("cancelReason", out var cancelReason))
-        {
-            var reason = cancelReason.GetInt32();
-            if (reason == 1) // User cancelled
-            {
-                return expiryDate > DateTime.UtcNow
-                    ? SubscriptionStatus.Cancelled
-                    : SubscriptionStatus.Expired;
-            }
-            if (reason == 2) // System cancelled (billing issue)
-            {
-                return SubscriptionStatus.Expired;
-            }
-            if (reason == 3) // Developer cancelled
-            {
-                return SubscriptionStatus.Refunded;
-            }
-        }
-
-        // Check for pause
-        if (subscription.TryGetProperty("autoResumeTimeMillis", out _))
-        {
-            return SubscriptionStatus.Paused;
-        }
-
-        // Check if expired
-        if (expiryDate < DateTime.UtcNow)
-        {
-            // Check for grace period
-            if (subscription.TryGetProperty("paymentState", out var ps) && ps.GetInt32() == 0)
-            {
-                return SubscriptionStatus.GracePeriod;
-            }
-            return SubscriptionStatus.Expired;
-        }
-
-        return SubscriptionStatus.Active;
+        return ValidateAccountBinding(
+            request,
+            snapshot.ExternalAccountIdentifiers?.ObfuscatedExternalAccountId);
     }
+
+    private VerificationResult? ValidateAccountBinding(
+        VerifyRequest request,
+        string? actual)
+    {
+        var expected = request.ExpectedObfuscatedAccountId;
+        if (string.IsNullOrWhiteSpace(expected))
+        {
+            return _config.RequireObfuscatedAccountId
+                ? VerificationResult.Invalid(
+                    "ACCOUNT_BINDING_REQUIRED",
+                    "Google Play account binding is required")
+                : null;
+        }
+
+        if (string.IsNullOrWhiteSpace(actual))
+        {
+            return VerificationResult.Invalid(
+                "ACCOUNT_BINDING_MISSING",
+                "The Google Play purchase is not bound to the expected account");
+        }
+
+        return FixedTimeEquals(expected, actual)
+            ? null
+            : VerificationResult.Invalid(
+                "ACCOUNT_BINDING_MISMATCH",
+                "The Google Play purchase belongs to a different account");
+    }
+
+    private static bool FixedTimeEquals(string expected, string actual)
+    {
+        var expectedBytes = Encoding.UTF8.GetBytes(expected);
+        var actualBytes = Encoding.UTF8.GetBytes(actual);
+        return expectedBytes.Length == actualBytes.Length &&
+               CryptographicOperations.FixedTimeEquals(expectedBytes, actualBytes);
+    }
+
+    private static GooglePlaySubscriptionQueryResult ClassifySubscriptionHttpFailure(
+        HttpStatusCode statusCode)
+    {
+        var numericStatus = (int)statusCode;
+        if (statusCode is HttpStatusCode.BadRequest or
+            HttpStatusCode.NotFound or
+            HttpStatusCode.Gone)
+        {
+            return GooglePlaySubscriptionQueryResult.Permanent(
+                "INVALID_RECEIPT",
+                $"Google Play rejected the purchase token ({numericStatus})");
+        }
+
+        if (statusCode is HttpStatusCode.Conflict or
+            HttpStatusCode.TooManyRequests ||
+            numericStatus >= 500)
+        {
+            return GooglePlaySubscriptionQueryResult.Retryable(
+                "STORE_ERROR",
+                $"Google Play is temporarily unavailable ({numericStatus})");
+        }
+
+        return GooglePlaySubscriptionQueryResult.Retryable(
+            "STORE_ERROR",
+            $"Google Play verification failed ({numericStatus})");
+    }
+
+    private static VerificationResult ClassifyVerificationHttpFailure(HttpStatusCode statusCode)
+    {
+        var numericStatus = (int)statusCode;
+        if (statusCode is HttpStatusCode.BadRequest or
+            HttpStatusCode.NotFound or
+            HttpStatusCode.Gone)
+        {
+            return VerificationResult.InvalidReceipt(
+                $"Google Play rejected the purchase token ({numericStatus})");
+        }
+
+        return VerificationResult.StoreError(
+            $"Google Play verification failed ({numericStatus})");
+    }
+
+    private static GooglePlaySubscriptionQueryResult ParseSubscriptionSnapshot(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(
+                json,
+                new JsonDocumentOptions { MaxDepth = 32 });
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !TryParseSubscriptionState(root, out var state) ||
+                !root.TryGetProperty("lineItems", out var lineItems) ||
+                lineItems.ValueKind != JsonValueKind.Array ||
+                lineItems.GetArrayLength() != 1)
+            {
+                return InvalidSubscriptionShape();
+            }
+
+            var lineItem = lineItems[0];
+            if (lineItem.ValueKind != JsonValueKind.Object ||
+                !TryGetRequiredString(lineItem, "productId", out var productId) ||
+                !TryReadOptionalUtcTimestamp(root, "startTime", out var startTime) ||
+                !TryReadOptionalUtcTimestamp(lineItem, "expiryTime", out var expiryTime) ||
+                !TryReadAutoRenewEnabled(lineItem, out var autoRenewEnabled) ||
+                !TryReadExternalAccountIdentifiers(root, out var externalIdentifiers))
+            {
+                return InvalidSubscriptionShape();
+            }
+
+            var latestOrderId = ReadOptionalString(lineItem, "latestSuccessfulOrderId") ??
+                                ReadOptionalString(root, "latestOrderId");
+
+            return GooglePlaySubscriptionQueryResult.Success(
+                new GooglePlaySubscriptionSnapshot
+                {
+                    State = state,
+                    ProductId = productId,
+                    StartTimeUtc = startTime,
+                    ExpiryTimeUtc = expiryTime,
+                    LatestSuccessfulOrderId = latestOrderId,
+                    AutoRenewEnabled = autoRenewEnabled,
+                    IsTestPurchase = root.TryGetProperty("testPurchase", out _),
+                    LinkedPurchaseToken = ReadOptionalString(root, "linkedPurchaseToken"),
+                    ExternalAccountIdentifiers = externalIdentifiers
+                });
+        }
+        catch (JsonException)
+        {
+            return InvalidSubscriptionShape();
+        }
+        catch (InvalidOperationException)
+        {
+            return InvalidSubscriptionShape();
+        }
+    }
+
+    private static bool TryParseSubscriptionState(
+        JsonElement root,
+        out GooglePlaySubscriptionState state)
+    {
+        state = GooglePlaySubscriptionState.Unspecified;
+        if (!TryGetRequiredString(root, "subscriptionState", out var rawState))
+        {
+            return false;
+        }
+
+        state = rawState switch
+        {
+            "SUBSCRIPTION_STATE_PENDING" => GooglePlaySubscriptionState.Pending,
+            "SUBSCRIPTION_STATE_ACTIVE" => GooglePlaySubscriptionState.Active,
+            "SUBSCRIPTION_STATE_PAUSED" => GooglePlaySubscriptionState.Paused,
+            "SUBSCRIPTION_STATE_IN_GRACE_PERIOD" => GooglePlaySubscriptionState.InGracePeriod,
+            "SUBSCRIPTION_STATE_ON_HOLD" => GooglePlaySubscriptionState.OnHold,
+            "SUBSCRIPTION_STATE_CANCELED" => GooglePlaySubscriptionState.Canceled,
+            "SUBSCRIPTION_STATE_EXPIRED" => GooglePlaySubscriptionState.Expired,
+            "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED" =>
+                GooglePlaySubscriptionState.PendingPurchaseCanceled,
+            _ => GooglePlaySubscriptionState.Unspecified
+        };
+        return true;
+    }
+
+    private static bool TryReadOptionalUtcTimestamp(
+        JsonElement parent,
+        string propertyName,
+        out DateTime? value)
+    {
+        value = null;
+        if (!parent.TryGetProperty(propertyName, out var property))
+        {
+            return true;
+        }
+
+        if (property.ValueKind != JsonValueKind.String ||
+            !DateTimeOffset.TryParse(
+                property.GetString(),
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+        {
+            return false;
+        }
+
+        value = parsed.UtcDateTime;
+        return true;
+    }
+
+    private static bool TryReadAutoRenewEnabled(JsonElement lineItem, out bool enabled)
+    {
+        enabled = false;
+        if (!lineItem.TryGetProperty("autoRenewingPlan", out var plan))
+        {
+            return true;
+        }
+
+        if (plan.ValueKind != JsonValueKind.Object ||
+            !plan.TryGetProperty("autoRenewEnabled", out var property) ||
+            property.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+        {
+            return false;
+        }
+
+        enabled = property.GetBoolean();
+        return true;
+    }
+
+    private static bool TryReadExternalAccountIdentifiers(
+        JsonElement root,
+        out GooglePlayExternalAccountIdentifiers? identifiers)
+    {
+        identifiers = null;
+        if (!root.TryGetProperty("externalAccountIdentifiers", out var value))
+        {
+            return true;
+        }
+
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        identifiers = new GooglePlayExternalAccountIdentifiers
+        {
+            ExternalAccountId = ReadOptionalString(value, "externalAccountId"),
+            ObfuscatedExternalAccountId = ReadOptionalString(
+                value,
+                "obfuscatedExternalAccountId"),
+            ObfuscatedExternalProfileId = ReadOptionalString(
+                value,
+                "obfuscatedExternalProfileId")
+        };
+        return true;
+    }
+
+    private static bool TryGetRequiredString(
+        JsonElement parent,
+        string propertyName,
+        out string value)
+    {
+        value = string.Empty;
+        if (!parent.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        value = property.GetString() ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(value);
+    }
+
+    private static string? ReadOptionalString(JsonElement parent, string propertyName)
+    {
+        if (!parent.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        var value = property.GetString();
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private static bool TryReadUnixMilliseconds(
+        JsonElement parent,
+        string propertyName,
+        out DateTime purchaseDateUtc)
+    {
+        purchaseDateUtc = default;
+        if (!parent.TryGetProperty(propertyName, out var property))
+        {
+            return false;
+        }
+
+        long milliseconds;
+        if (property.ValueKind == JsonValueKind.Number)
+        {
+            if (!property.TryGetInt64(out milliseconds))
+            {
+                return false;
+            }
+        }
+        else if (property.ValueKind == JsonValueKind.String)
+        {
+            if (!long.TryParse(
+                    property.GetString(),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out milliseconds))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            return false;
+        }
+
+        try
+        {
+            purchaseDateUtc = DateTimeOffset
+                .FromUnixTimeMilliseconds(milliseconds)
+                .UtcDateTime;
+            return true;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return false;
+        }
+    }
+
+    private static GooglePlaySubscriptionQueryResult InvalidSubscriptionShape() =>
+        GooglePlaySubscriptionQueryResult.Permanent(
+            "UNSUPPORTED_SUBSCRIPTION_SHAPE",
+            "Google Play returned an unsupported subscription shape");
 
     private async Task<string> GetAccessTokenAsync(CancellationToken ct)
     {
@@ -321,4 +752,10 @@ public sealed class GoogleVerifierConfig
     /// Application package name.
     /// </summary>
     public string PackageName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Requires the Google Play purchase to be bound to the authenticated player via
+    /// externalAccountIdentifiers.obfuscatedExternalAccountId.
+    /// </summary>
+    public bool RequireObfuscatedAccountId { get; set; } = true;
 }

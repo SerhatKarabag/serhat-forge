@@ -1,5 +1,8 @@
+#nullable enable
+
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using Serhat.Backend.Core;
 using Serhat.Backend.Monetization.Abstractions;
 using Serhat.Backend.Monetization.Domain;
@@ -13,11 +16,11 @@ namespace Serhat.Backend.Monetization.Persistence
     [Serializable]
     public sealed class PendingPurchase
     {
-        public string ProductId;
-        public string Platform;
-        public string TransactionId;
-        public string ReceiptPayload;
-        public string ProductType;
+        public string ProductId = string.Empty;
+        public string Platform = string.Empty;
+        public string TransactionId = string.Empty;
+        public string ReceiptPayload = string.Empty;
+        public string ProductType = string.Empty;
         public string? TierKey;
         public long CreatedAtMs;
         public int RetryCount;
@@ -30,10 +33,19 @@ namespace Serhat.Backend.Monetization.Persistence
 
         public PendingPurchase(StoreReceipt receipt, ProductDefinition? productDef, long createdAtMs)
         {
+            if (receipt == null)
+            {
+                throw new ArgumentNullException(nameof(receipt));
+            }
+
+            EnsureRequiredReceiptData(receipt);
+
             ProductId = receipt.ProductId;
             Platform = receipt.Platform;
             TransactionId = receipt.TransactionId;
-            ReceiptPayload = receipt.ReceiptPayload;
+            // Apple server verification uses only the transaction ID. Never persist a raw App
+            // Store receipt/JWS even if a custom store adapter accidentally supplies one.
+            ReceiptPayload = IsApple(receipt.Platform) ? string.Empty : receipt.ReceiptPayload;
             ProductType = productDef?.Type.ToString() ?? "Unknown";
             TierKey = productDef?.TierKey;
             CreatedAtMs = createdAtMs;
@@ -45,6 +57,21 @@ namespace Serhat.Backend.Monetization.Persistence
                 MetadataJson = JsonUtility.ToJson(new SerializableDictionary(receipt.Metadata));
             }
         }
+
+        internal PendingPurchase Copy() =>
+            new()
+            {
+                ProductId = ProductId ?? string.Empty,
+                Platform = Platform ?? string.Empty,
+                TransactionId = TransactionId ?? string.Empty,
+                ReceiptPayload = IsApple(Platform) ? string.Empty : ReceiptPayload ?? string.Empty,
+                ProductType = ProductType ?? string.Empty,
+                TierKey = TierKey,
+                CreatedAtMs = CreatedAtMs,
+                RetryCount = RetryCount,
+                LastError = LastError,
+                MetadataJson = MetadataJson
+            };
 
         public Dictionary<string, string> GetMetadata()
         {
@@ -63,6 +90,29 @@ namespace Serhat.Backend.Monetization.Persistence
                 return new Dictionary<string, string>();
             }
         }
+
+        internal bool HasRequiredData() =>
+            !string.IsNullOrWhiteSpace(ProductId) &&
+            !string.IsNullOrWhiteSpace(Platform) &&
+            !string.IsNullOrWhiteSpace(TransactionId) &&
+            (IsApple(Platform) || !string.IsNullOrWhiteSpace(ReceiptPayload));
+
+        private static void EnsureRequiredReceiptData(StoreReceipt receipt)
+        {
+            if (string.IsNullOrWhiteSpace(receipt.ProductId) ||
+                string.IsNullOrWhiteSpace(receipt.Platform) ||
+                string.IsNullOrWhiteSpace(receipt.TransactionId) ||
+                (!IsApple(receipt.Platform) &&
+                 string.IsNullOrWhiteSpace(receipt.ReceiptPayload)))
+            {
+                throw new ArgumentException(
+                    "Receipt must include product, platform, transaction, and the platform-required payload.",
+                    nameof(receipt));
+            }
+        }
+
+        private static bool IsApple(string? platform) =>
+            string.Equals(platform, "apple", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -88,9 +138,18 @@ namespace Serhat.Backend.Monetization.Persistence
         public Dictionary<string, string> ToDictionary()
         {
             var result = new Dictionary<string, string>();
+            if (Keys == null || Values == null)
+            {
+                return result;
+            }
+
             for (int i = 0; i < Keys.Count && i < Values.Count; i++)
             {
-                result[Keys[i]] = Values[i];
+                var key = Keys[i];
+                if (!string.IsNullOrWhiteSpace(key))
+                {
+                    result[key] = Values[i] ?? string.Empty;
+                }
             }
             return result;
         }
@@ -108,21 +167,23 @@ namespace Serhat.Backend.Monetization.Persistence
     /// <summary>
     /// Persistent storage for pending purchases.
     /// Ensures crash-safe handling of purchases awaiting verification.
-    /// Uses PlayerPrefs for synchronous persistence (pending purchases must survive crashes).
+    /// Uses the injected local storage for synchronous persistence (pending purchases must survive crashes).
     /// </summary>
     public sealed class PendingPurchaseStore
     {
         private const string StorageKey = "SerhatBackendSdk_PendingPurchases";
-        private const int MaxRetries = 5;
         private const long RetryBackoffBaseMs = 5000; // 5 seconds
+        private const long MaxRetryBackoffMs = 30 * 60 * 1000; // 30 minutes
 
+        private readonly IStorage _storage;
         private readonly IClock _clock;
         private readonly object _lock = new();
         private PendingPurchaseContainer _container;
 
         public PendingPurchaseStore(IStorage storage, IClock clock)
         {
-            _clock = clock;
+            _storage = storage ?? throw new ArgumentNullException(nameof(storage));
+            _clock = clock ?? throw new ArgumentNullException(nameof(clock));
             _container = Load();
         }
 
@@ -133,7 +194,13 @@ namespace Serhat.Backend.Monetization.Persistence
         {
             lock (_lock)
             {
-                return _container.Purchases.ToArray();
+                var snapshot = new PendingPurchase[_container.Purchases.Count];
+                for (var i = 0; i < snapshot.Length; i++)
+                {
+                    snapshot[i] = _container.Purchases[i].Copy();
+                }
+
+                return snapshot;
             }
         }
 
@@ -149,17 +216,17 @@ namespace Serhat.Backend.Monetization.Persistence
 
                 foreach (var purchase in _container.Purchases)
                 {
-                    if (purchase.RetryCount >= MaxRetries)
+                    if (!purchase.HasRequiredData())
                     {
-                        continue; // Max retries exceeded
+                        continue;
                     }
 
                     var backoffMs = CalculateBackoff(purchase.RetryCount);
-                    var nextRetryAt = purchase.CreatedAtMs + backoffMs;
+                    var nextRetryAt = AddWithoutOverflow(purchase.CreatedAtMs, backoffMs);
 
                     if (now >= nextRetryAt)
                     {
-                        ready.Add(purchase);
+                        ready.Add(purchase.Copy());
                     }
                 }
 
@@ -168,10 +235,55 @@ namespace Serhat.Backend.Monetization.Persistence
         }
 
         /// <summary>
+        /// Gets the bounded delay until the next valid pending purchase should be retried,
+        /// or null when no valid pending purchase exists.
+        /// </summary>
+        internal TimeSpan? GetTimeUntilNextRetry()
+        {
+            lock (_lock)
+            {
+                var now = _clock.TimestampMs;
+                long? shortestDelayMs = null;
+
+                foreach (var purchase in _container.Purchases)
+                {
+                    if (!purchase.HasRequiredData())
+                    {
+                        continue;
+                    }
+
+                    var nextRetryAt = AddWithoutOverflow(
+                        purchase.CreatedAtMs,
+                        CalculateBackoff(purchase.RetryCount));
+                    var retryWindowEnd = AddWithoutOverflow(now, MaxRetryBackoffMs);
+                    var remainingMs = nextRetryAt <= now
+                        ? 0
+                        : nextRetryAt >= retryWindowEnd
+                            ? MaxRetryBackoffMs
+                            : nextRetryAt - now;
+
+                    if (!shortestDelayMs.HasValue || remainingMs < shortestDelayMs.Value)
+                    {
+                        shortestDelayMs = remainingMs;
+                    }
+                }
+
+                return shortestDelayMs.HasValue
+                    ? TimeSpan.FromMilliseconds(shortestDelayMs.Value)
+                    : null;
+            }
+        }
+
+        /// <summary>
         /// Adds a pending purchase.
         /// </summary>
         public void Add(StoreReceipt receipt, ProductDefinition? productDef)
         {
+            if (receipt == null)
+            {
+                throw new ArgumentNullException(nameof(receipt));
+            }
+
             lock (_lock)
             {
                 // Check for duplicates
@@ -186,7 +298,15 @@ namespace Serhat.Backend.Monetization.Persistence
 
                 var pending = new PendingPurchase(receipt, productDef, _clock.TimestampMs);
                 _container.Purchases.Add(pending);
-                Save();
+                try
+                {
+                    Save();
+                }
+                catch
+                {
+                    _container.Purchases.Remove(pending);
+                    throw;
+                }
             }
         }
 
@@ -197,10 +317,26 @@ namespace Serhat.Backend.Monetization.Persistence
         {
             lock (_lock)
             {
+                var removed = _container.Purchases.FindAll(p =>
+                    p.TransactionId == transactionId &&
+                    p.Platform == platform);
+                if (removed.Count == 0)
+                {
+                    return;
+                }
+
                 _container.Purchases.RemoveAll(p =>
                     p.TransactionId == transactionId &&
                     p.Platform == platform);
-                Save();
+                try
+                {
+                    Save();
+                }
+                catch
+                {
+                    _container.Purchases.AddRange(removed);
+                    throw;
+                }
             }
         }
 
@@ -217,10 +353,26 @@ namespace Serhat.Backend.Monetization.Persistence
 
                 if (purchase != null)
                 {
-                    purchase.RetryCount++;
+                    var previousRetryCount = purchase.RetryCount;
+                    var previousLastError = purchase.LastError;
+                    var previousCreatedAtMs = purchase.CreatedAtMs;
+                    if (purchase.RetryCount < int.MaxValue)
+                    {
+                        purchase.RetryCount++;
+                    }
                     purchase.LastError = error;
                     purchase.CreatedAtMs = _clock.TimestampMs; // Reset timer for backoff
-                    Save();
+                    try
+                    {
+                        Save();
+                    }
+                    catch
+                    {
+                        purchase.RetryCount = previousRetryCount;
+                        purchase.LastError = previousLastError;
+                        purchase.CreatedAtMs = previousCreatedAtMs;
+                        throw;
+                    }
                 }
             }
         }
@@ -232,10 +384,26 @@ namespace Serhat.Backend.Monetization.Persistence
         {
             lock (_lock)
             {
+                var removed = _container.Purchases.FindAll(p =>
+                    p.TransactionId == transactionId &&
+                    p.Platform == platform);
+                if (removed.Count == 0)
+                {
+                    return;
+                }
+
                 _container.Purchases.RemoveAll(p =>
                     p.TransactionId == transactionId &&
                     p.Platform == platform);
-                Save();
+                try
+                {
+                    Save();
+                }
+                catch
+                {
+                    _container.Purchases.AddRange(removed);
+                    throw;
+                }
             }
         }
 
@@ -246,8 +414,17 @@ namespace Serhat.Backend.Monetization.Persistence
         {
             lock (_lock)
             {
+                var previous = new List<PendingPurchase>(_container.Purchases);
                 _container.Purchases.Clear();
-                Save();
+                try
+                {
+                    Save();
+                }
+                catch
+                {
+                    _container.Purchases.AddRange(previous);
+                    throw;
+                }
             }
         }
 
@@ -269,11 +446,29 @@ namespace Serhat.Backend.Monetization.Persistence
         {
             try
             {
-                var json = PlayerPrefs.GetString(StorageKey, null);
+                // Invoke async storage on a context-free worker before synchronously joining.
+                // A durable receipt must be persisted before verification continues, and calling
+                // an arbitrary async IStorage directly from Unity's synchronization context can
+                // deadlock when that implementation captures the caller context.
+                var json = Task
+                    .Run(() => _storage.ReadAsync(StorageKey))
+                    .GetAwaiter()
+                    .GetResult();
                 if (!string.IsNullOrEmpty(json))
                 {
-                    return JsonUtility.FromJson<PendingPurchaseContainer>(json)
-                           ?? new PendingPurchaseContainer();
+                    var container = JsonUtility.FromJson<PendingPurchaseContainer>(json)
+                                    ?? new PendingPurchaseContainer();
+                    container.Purchases ??= new List<PendingPurchase>();
+
+                    var invalidCount = container.Purchases.RemoveAll(purchase =>
+                        purchase == null || !purchase.HasRequiredData());
+                    if (invalidCount > 0)
+                    {
+                        Debug.LogWarning(
+                            $"[PendingPurchaseStore] Ignored {invalidCount} invalid persisted record(s).");
+                    }
+
+                    return container;
                 }
             }
             catch (Exception ex)
@@ -289,19 +484,30 @@ namespace Serhat.Backend.Monetization.Persistence
             try
             {
                 var json = JsonUtility.ToJson(_container);
-                PlayerPrefs.SetString(StorageKey, json);
-                PlayerPrefs.Save();
+                Task
+                    .Run(() => _storage.WriteAsync(StorageKey, json))
+                    .GetAwaiter()
+                    .GetResult();
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[PendingPurchaseStore] Failed to save: {ex.Message}");
+                throw new InvalidOperationException(
+                    "Pending purchase state could not be persisted.",
+                    ex);
             }
         }
 
         private static long CalculateBackoff(int retryCount)
         {
-            // Exponential backoff: 5s, 10s, 20s, 40s, 80s
-            return RetryBackoffBaseMs * (1L << retryCount);
+            var boundedExponent = Math.Min(Math.Max(retryCount, 0), 20);
+            var exponentialDelay = RetryBackoffBaseMs * (1L << boundedExponent);
+            return Math.Min(exponentialDelay, MaxRetryBackoffMs);
         }
+
+        private static long AddWithoutOverflow(long value, long increment) =>
+            value > long.MaxValue - increment
+                ? long.MaxValue
+                : value + increment;
     }
 }

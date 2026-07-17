@@ -1,65 +1,67 @@
-# Serhat Forge Game API Backend Sample
+# Serhat Forge Game API backend sample
 
-> Optional reference implementation. This project demonstrates one possible level/progression economy and is not part of the default Serhat Forge runtime.
+Optional .NET 8 Azure Functions reference implementation for a PlayFab-backed game API. It demonstrates trusted caller binding, server-owned progression/economy rules, idempotent writes, structured errors, and observability.
 
-Server-side Azure Functions for PlayFab CloudScript with idempotency, validation, and observability.
+This is a sample game domain, not part of the default Serhat Forge runtime. Replace its levels, lives, currencies, boosters, rewards, leaderboards, and balance rules with your own contracts before shipping.
 
-> **v2.0 Changes**: Namespace standardized as `Serhat.Forge.CloudScript`. TitleId is now injected via configuration rather than hardcoded.
+## What it demonstrates
 
-## Features
+- PlayFab ExecuteFunction integration
+- Production identity binding to `CallerEntityProfile.Lineage.TitlePlayerAccountId`
+- Title ID validation against `TitleAuthenticationContext.Id`
+- Server-side request and progression validation
+- Idempotent write execution backed by Azure Table Storage
+- Persistent player progress and PlayFab server operations
+- Read/write response envelopes with correlation IDs
+- Retryable/non-retryable error classification
+- Configurable balance, events, daily gifts, and client-version policy through PlayFab Title Data
+- Application Insights integration hooks
 
-- **Idempotent Operations**: Prevents duplicate writes via idempotency store
-- **Server-Authoritative**: All game logic validated server-side
-- **Structured Logging**: Correlation IDs and telemetry
-- **PlayFab Integration**: Server API for secure data access
-- **Validation**: Input validation with detailed error messages
-- **Anti-Cheat**: Server-side integrity checks
+This is validation infrastructure, not a complete anti-cheat solution. Add game-specific abuse detection, rate limits, audit trails, and operational alerts appropriate to your threat model.
 
-## Project Structure
+## Boundary with monetization
 
-```
-Samples~/GameApiBackend/
-  src/
-    Functions/           # Azure Function endpoints
-      FunctionBase.cs
-      GetBootstrapFunction.cs
-      SubmitLevelResultFunction.cs
-      SyncPlayerStateFunction.cs
-      GrantPurchaseRewardsFunction.cs # retired; always returns HTTP 410
-      IapVerifyFunction.cs             # retired; always returns HTTP 410
-      IapGetEntitlementsFunction.cs    # retired; always returns HTTP 410
-    Domain/
-      DTOs/              # Data transfer objects
-      Validation/        # Request validators
-      ErrorCodes.cs
-      PlayerProgressMerger.cs
-    Infrastructure/
-      Idempotency/       # Idempotency store
-      PlayFab/           # PlayFab server gateway
-      Logging/           # Correlation context
-  tests/
-    Unit/                # xUnit tests
-  Program.cs
-  host.json
-  local.settings.template.json
-```
+The following legacy functions are deliberately disabled and always return `410 Gone / LEGACY_MONETIZATION_DISABLED`:
 
-> The legacy monetization endpoints are intentionally fail-closed and always return
-> `410 Gone / LEGACY_MONETIZATION_DISABLED`. Deploy and register the separate hardened
-> `cloudscript-azure-functions-monetization` Function App for all purchase flows.
+- `GrantPurchaseRewards`
+- `IapVerify`
+- `IapGetEntitlements`
+
+Deploy `cloudscript-azure-functions-monetization` to a separate Function App and register its `VerifyPurchase` and `GetEntitlements` functions for every purchase flow. Never grant store value through this gameplay sample.
+
+## Functions
+
+| Function | Type | Purpose |
+|---|---|---|
+| `GetBootstrap` | Read | Returns authoritative progress, economy/balance configuration, events, and daily-gift state |
+| `GetLeaderboard` | Read | Returns world/country leaderboard data |
+| `RefreshLeaderboardMetadata` | Idempotent read-style operation | Re-stamps leaderboard metadata from authoritative PlayFab profile/progress data |
+| `SubmitLevelResult` | Idempotent write | Validates and applies a completed level result |
+| `SyncPlayerState` | Idempotent write | Reconciles allowed mutable state changes; gains remain server-owned |
+| `BuyLivesWithCoins` | Idempotent write | Performs an authoritative soft-currency exchange |
+| `BuyStartBoosterWithCoins` | Idempotent write | Purchases a configured start-booster offer |
+| `BuyBoosterWithCoins` | Idempotent write | Purchases a configured gameplay-booster offer |
+| `GrantAdRewardLife` | Idempotent write | Applies the sample rewarded-ad life grant contract |
+| `GrantAdRewardCoins` | Idempotent write | Applies the sample rewarded-ad coin grant contract |
+| `ClaimRateUsReward` | Idempotent write | Claims a one-time configured reward |
+| `ClaimDailyGift` | Idempotent write | Claims the current server-day gift and advances streak state |
+| `BackfillLeaderboardPlayer` | Administrative | Backfills one player's name/stats for a controlled PlayFab segment operation |
+
+`BackfillLeaderboardPlayer` intentionally accepts an administrative payload and does not use the normal player identity parser. Protect its function key as an operator credential, do not register it as a client-callable function, and restrict it with your deployment/network policy.
 
 ## Prerequisites
 
 - .NET 8 SDK
 - Azure Functions Core Tools v4
-- Azure Storage Emulator (Azurite) for local development
-- PlayFab account with Title ID and Developer Secret Key
+- Azurite for the default local storage configuration
+- A PlayFab title
+- A PlayFab developer secret available only to the Function App
 
-## Local Development
+## Local development
 
-### 1. Configure Settings
+### 1. Configure local settings
 
-Copy `local.settings.template.json` to `local.settings.json`:
+Copy `local.settings.template.json` to the git-ignored `local.settings.json`, then set real development values:
 
 ```json
 {
@@ -67,8 +69,9 @@ Copy `local.settings.template.json` to `local.settings.json`:
   "Values": {
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
-    "PLAYFAB_TITLE_ID": "YOUR_TITLE_ID",
-    "PLAYFAB_DEV_SECRET_KEY": "YOUR_SECRET_KEY",
+    "AZURE_FUNCTIONS_ENVIRONMENT": "Development",
+    "PLAYFAB_TITLE_ID": "YOUR_DEVELOPMENT_TITLE_ID",
+    "PLAYFAB_DEV_SECRET_KEY": "YOUR_LOCAL_DEVELOPMENT_SECRET",
     "AZURE_STORAGE_CONNECTION_STRING": "UseDevelopmentStorage=true",
     "IDEMPOTENCY_TABLE_NAME": "IdempotencyStore",
     "IDEMPOTENCY_TTL_HOURS": "24"
@@ -76,140 +79,89 @@ Copy `local.settings.template.json` to `local.settings.json`:
 }
 ```
 
-### 2. Start Storage Emulator
+`PLAYFAB_TITLE_ID` and `PLAYFAB_DEV_SECRET_KEY` are required even locally. Do not reuse production secrets for local development and never commit `local.settings.json`.
+
+### 2. Start storage and functions
 
 ```bash
-# Using Azurite
 azurite --silent --location ./azurite-data --debug ./azurite-debug.log
 ```
 
-### 3. Run the Functions
+In another terminal:
 
 ```bash
 cd Samples~/GameApiBackend
 func start
 ```
 
-Functions will be available at `http://localhost:7071/api/`
+The local host exposes routes under `http://localhost:7071/api/`.
 
-## API Endpoints
+Raw inner envelopes are accepted only when the environment is exactly `Development`, `Local`, or `Test`. Production rejects them and requires the PlayFab wrapper.
 
-### GetBootstrap
+## Request contract
 
-Loads player progress.
+The Unity Backend SDK creates the inner envelope. A write looks like:
 
-**Request:**
-```json
-{
-  "functionName": "GetBootstrap",
-  "correlationId": "abc12345",
-  "payload": {},
-  "caller": {
-    "playerId": "PLAYER_ID",
-    "titleId": "YOUR_TITLE"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "correlationId": "abc12345",
-  "success": true,
-  "data": {
-    "progress": {
-      "schemaVersion": 1,
-      "stateVersion": 1,
-      "playerId": "PLAYER_ID",
-      "currentLevel": 1,
-      "results": {},
-      "lastUpdatedUtc": "2026-01-20T14:00:00Z"
-    }
-  },
-  "processingTimeMs": 45
-}
-```
-
-### SubmitLevelResult
-
-Submits a completed level result. **Requires idempotencyKey**.
-
-**Request:**
 ```json
 {
   "functionName": "SubmitLevelResult",
-  "correlationId": "def67890",
-  "idempotencyKey": "unique-guid-here",
+  "correlationId": "fb8991b3d3e747f69ca07b8b5bc266bb",
+  "idempotencyKey": "550e8400-e29b-41d4-a716-446655440000",
   "payload": {
     "levelId": 1,
     "stars": 3,
     "timeSec": 54.2
   },
   "caller": {
-    "playerId": "PLAYER_ID"
+    "playerId": "LOCAL_PLAYER_ONLY",
+    "titleId": "YOUR_DEVELOPMENT_TITLE_ID"
   }
 }
 ```
 
-**Response:**
-```json
-{
-  "correlationId": "def67890",
-  "success": true,
-  "data": {
-    "success": true,
-    "newCurrentLevel": 2
-  }
-}
-```
+In production, PlayFab wraps this object as `FunctionArgument`/`FunctionParameter`. The Function App ignores the inner caller identity, verifies the wrapper title ID, and replaces caller fields with the trusted title-player account ID.
 
-### SyncPlayerState
-
-Synchronizes mutable player state. Consumption changes are accepted, gains remain server-authoritative.
-
-### Legacy monetization endpoints
-
-`GrantPurchaseRewards`, `IapVerify`, and `IapGetEntitlements` are retained only to
-fail closed during migration. They never verify, grant, or return purchase data.
+Do not call Function URLs directly from a shipped Unity client.
 
 ## Idempotency
 
-All write operations require an `idempotencyKey` in the request envelope:
+Every operation implemented with `ExecuteIdempotentAsync` requires an `idempotencyKey`:
 
-1. First request with key: Operation executed and result cached
-2. Duplicate request with same key: Cached result returned
-3. Keys expire after configured TTL (default: 24 hours)
+1. The first request atomically creates an `InProgress` record.
+2. A duplicate completed request receives its cached result.
+3. A concurrent duplicate receives `IDEMPOTENCY_CONFLICT` and may retry.
+4. A failed record returns the stored failure.
 
-### Storage
+Azure Table keys are:
 
-- **Production**: Azure Table Storage
-- **Local Dev**: In-memory store (or Table Storage with Azurite)
+| Field | Value |
+|---|---|
+| Partition key | `{TitleId}:{FunctionName}` |
+| Row key | `{PlayerId}:{IdempotencyKey}` |
 
-### Table Schema
+Expiration is enforced when records are read; add a scheduled cleanup job to control table growth. `IDEMPOTENCY_TTL_HOURS` must be between 1 and 168.
 
-| Column | Description |
-|--------|-------------|
-| PartitionKey | `{TitleId}:{FunctionName}` |
-| RowKey | `{PlayerId}:{IdempotencyKey}` |
-| Status | `InProgress`, `Completed`, `Failed` |
-| ResponsePayload | JSON response (for completed) |
-| CreatedAtUtc | Creation timestamp |
-| ExpiresAtUtc | TTL expiration |
+Keep the same idempotency key when retrying the same user intent. Generate a new key for a genuinely new operation.
 
-### Cleanup
+## Response contract
 
-Expired records should be cleaned up via:
-- Azure Table Storage TTL policy (if available)
-- Scheduled Azure Function (recommended)
-- Manual cleanup job
-
-## Error Handling
-
-All errors follow this format:
+Success:
 
 ```json
 {
-  "correlationId": "...",
+  "correlationId": "fb8991b3d3e747f69ca07b8b5bc266bb",
+  "success": true,
+  "data": {},
+  "processingTimeMs": 45,
+  "serverUtcNow": "2026-07-17T12:00:00Z"
+}
+```
+
+Failure:
+
+```json
+{
+  "correlationId": "fb8991b3d3e747f69ca07b8b5bc266bb",
   "success": false,
   "error": {
     "code": "VALIDATION_FAILED",
@@ -218,24 +170,30 @@ All errors follow this format:
     "details": {
       "LevelId": "LevelId must be >= 1"
     }
-  }
+  },
+  "processingTimeMs": 3,
+  "serverUtcNow": "2026-07-17T12:00:00Z"
 }
 ```
 
-### Error Codes
+Only retry failures marked `retryable`, and keep the original idempotency key for that operation.
 
-| Code | Retryable | Description |
-|------|-----------|-------------|
-| `VALIDATION_FAILED` | No | Request validation failed |
-| `MISSING_IDEMPOTENCY_KEY` | No | Write operation without idempotency key |
-| `INVALID_LEVEL` | No | Level id is invalid or out of sequence |
-| `ALREADY_COMPLETED` | No | Level result already recorded |
-| `IDEMPOTENCY_CONFLICT` | Yes | Request already in progress |
-| `PLAYFAB_ERROR` | Varies | PlayFab API error |
-| `INTERNAL_ERROR` | Yes | Unexpected server error |
+## PlayFab Title Data
 
+The sample can read these optional keys:
 
-## Testing
+| Key | Purpose |
+|---|---|
+| `game_balance_v1` | Gameplay/economy balance |
+| `crown_event_v1` | Crown event configuration |
+| `daily_gift_v1` | Daily-gift schedule |
+| `client_version_policy` | Minimum supported client versions |
+
+Invalid or missing optional content follows the behavior implemented by each provider (fallback or warning). Validate Title Data in staging before promoting it.
+
+## Tests
+
+From the repository root:
 
 ```bash
 dotnet test Samples~/GameApiBackend/tests/Serhat.Forge.CloudScript.Tests.csproj \
@@ -243,107 +201,49 @@ dotnet test Samples~/GameApiBackend/tests/Serhat.Forge.CloudScript.Tests.csproj 
   --property:TreatWarningsAsErrors=true
 ```
 
-Tests include:
-- `PlayerProgressMergerTests` - Merge logic
-- `IdempotencyStoreTests` - In-memory store behavior
-- `ValidationTests` - Request validation
+The project covers progression merging, request validation, idempotency, monetization hardening/lifecycle code, and webhook parsing. These unit tests do not contact PlayFab, Azure, Apple, or Google; run separate staging integration tests.
 
+## Production deployment
 
-## Deployment
+### Required Function App settings
 
-### Azure Target Template
-
-| Field | Value |
-|---|---|
-| Azure account | `<AZURE_ACCOUNT>` |
-| Subscription | `<AZURE_SUBSCRIPTION_NAME>` (`<AZURE_SUBSCRIPTION_ID>`) |
-| Resource Group | `<AZURE_RESOURCE_GROUP>` |
-| Function App | `<FUNCTION_APP_NAME>` |
-| Default host | `<FUNCTION_APP_NAME>.azurewebsites.net` |
-| Runtime | Linux, .NET 8 isolated |
-
-**Single deploy command** (run from repo root or this folder):
-
-```bash
-cd Samples~/GameApiBackend
-func azure functionapp publish <FUNCTION_APP_NAME>
-```
-
-`func azure functionapp publish` handles the .NET-isolated packaging (including the hidden `.azurefunctions/` folder) automatically — always use this instead of hand-zipping.
-
-**Pre-flight checks** (a matter of seconds, catches 90% of deploy failures):
-
-```bash
-# 1. Logged into the right Azure account?
-az account show --query "{user:user.name, sub:name}" -o table
-#    Expect: <AZURE_ACCOUNT> / <AZURE_SUBSCRIPTION_NAME>
-
-# 2. Function App is running?
-az functionapp show -g <AZURE_RESOURCE_GROUP> -n <FUNCTION_APP_NAME> --query state -o tsv
-#    Expect: Running
-
-# 3. Code builds clean?
-dotnet build --nologo -v q
-#    Expect: 0 errors
-
-# 4. local.settings.json exists? (git-ignored; required by `func` to detect runtime)
-test -f local.settings.json && echo OK || cp local.settings.template.json local.settings.json
-```
-
-> **Gotcha**: `func azure functionapp publish` reads `FUNCTIONS_WORKER_RUNTIME` from a local `local.settings.json`, even though the actual runtime is configured on Azure side. If the file is missing you'll see:
-> `Can't determine project language from files. Please use one of [--dotnet-isolated, ...]` / `Worker runtime cannot be 'None'`.
-> Fix: copy the template (`cp local.settings.template.json local.settings.json`), or create a minimal one with just `FUNCTIONS_WORKER_RUNTIME=dotnet-isolated` and `AzureWebJobsStorage=UseDevelopmentStorage=true`. The file is in `.gitignore` — safe to keep locally.
-
-**Post-deploy verification:**
-
-```bash
-# List functions live on the App — new endpoints should appear here.
-az functionapp function list -g <AZURE_RESOURCE_GROUP> -n <FUNCTION_APP_NAME> \
-    --query "[].name" -o tsv
-```
-
-**Known pitfalls (do NOT use these alternatives):**
-- Do not zip `publish\*` with a PowerShell wildcard — hidden `.azurefunctions/` is skipped, Azure loads `0 functions`, all HTTP routes return `404`.
-- Do not use `az webapp deployment source config-zip` on this project unless you rebuild the zip with `Compress-Archive -Force -Path publish/* -Force` **and** separately add the hidden folder. `func azure functionapp publish` avoids this class of bugs.
-- Monetization flows live on a **separate** Function App (deploy `cloudscript-azure-functions-monetization` there) — do NOT point monetization at `<your-gameplay-function-app>`.
-
-**Application Settings that must exist on the Function App** (set once, persist across deploys):
+- `AZURE_FUNCTIONS_ENVIRONMENT=Production`
 - `PLAYFAB_TITLE_ID`
-- `PLAYFAB_DEV_SECRET_KEY` (never commit — server-side only)
+- `PLAYFAB_DEV_SECRET_KEY`
 - `AZURE_STORAGE_CONNECTION_STRING`
 - `IDEMPOTENCY_TABLE_NAME` (default `IdempotencyStore`)
 - `IDEMPOTENCY_TTL_HOURS` (default `24`)
 
-### PlayFab Registration (required for every NEW function)
+Production startup rejects missing/placeholder title credentials, missing storage, development storage, invalid table names, and invalid TTL values.
 
-Every newly added `[Function("XYZ")]` attribute on the server needs a matching entry in PlayFab; existing entries keep working across re-deploys because the URL stays the same.
+Publish with Azure Functions Core Tools so the .NET isolated worker layout, including `.azurefunctions`, is preserved:
 
-1. Azure Portal → `<your-gameplay-function-app>` → **Functions → `XYZ` → Get Function URL** (function-level key works; you can also use the master host key).
-2. PlayFab Game Manager → **Automation → Cloud Script → Functions → Register Function**
-   - **Function Name**: `XYZ` (must match the `[Function("XYZ")]` attribute exactly)
-   - **Trigger Type**: `HTTP`
-   - **Function URL**: the URL from step 1 (includes `?code=...`)
-3. Save. Unity client resolves `"XYZ"` via `PlayFab ExecuteFunction` from this point on.
-
-If a client call returns `Function not found`, this registration is the first thing to check.
-
-## Unity SDK Integration
-
-The Unity SDK calls these functions via PlayFab's ExecuteFunction API:
-
-```csharp
-// Unity client automatically:
-// - Generates correlationId
-// - Generates idempotencyKey for writes
-// - Wraps payload in RequestEnvelope
-// - Handles ResponseEnvelope parsing
+```bash
+cd Samples~/GameApiBackend
+func azure functionapp publish YOUR_GAMEPLAY_FUNCTION_APP --dotnet-isolated
 ```
 
-## Security
+Avoid hand-built deployment ZIPs unless your pipeline explicitly preserves hidden files and validates the deployed function list.
 
-- **Never expose `PLAYFAB_DEV_SECRET_KEY`** - Only used server-side
-- Production requests require the PlayFab ExecuteFunction wrapper and bind identity
-  to `CallerEntityProfile.Lineage.TitlePlayerAccountId`; client-supplied `caller` data
-  is ignored. Raw envelopes are accepted only in Development/Local/Test.
-- Input validation on all endpoints
-- Server-authoritative game logic (level progression validation)
+### Register client-callable functions in PlayFab
+
+For each client-callable `[Function("Name")]`:
+
+1. Obtain the function-key URL from the Azure Function App.
+2. In PlayFab Game Manager, register an HTTP CloudScript function with the exact same name.
+3. Store the URL/key only in the PlayFab registration and deployment system.
+4. Do not register `BackfillLeaderboardPlayer` or the three retired monetization stubs as client-callable functions.
+
+After deployment, verify the live function list and exercise authentication, duplicate writes, malformed bodies, oversized bodies, and title-ID mismatch handling in staging.
+
+## Production checklist
+
+- [ ] Sample game contracts and economy values were replaced/reviewed.
+- [ ] Unity authenticates with PlayFab before calling the Game API.
+- [ ] Secrets and function keys are absent from the client, repository, and logs.
+- [ ] Azure Table Storage is persistent and cleanup is scheduled.
+- [ ] Client retry/outbox behavior preserves idempotency keys.
+- [ ] Server-authoritative rewards are reconciled from server responses/bootstrap, never granted optimistically.
+- [ ] Administrative functions have separate access controls.
+- [ ] Alerts cover error rate, latency, PlayFab throttling, idempotency conflicts, and failed writes.
+- [ ] Monetization is deployed and registered on its separate hardened Function App.

@@ -1,9 +1,25 @@
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Serhat.Forge.CloudScript.Framework.Monetization.Domain;
 
 namespace Serhat.Forge.CloudScript.Framework.Monetization.Abstractions;
+
+/// <summary>
+/// Result of atomically creating or reclaiming a purchase-processing lease.
+/// </summary>
+public sealed class PurchaseClaimResult
+{
+    public bool Acquired { get; }
+    public PurchaseRecord Record { get; }
+
+    public PurchaseClaimResult(bool acquired, PurchaseRecord record)
+    {
+        Acquired = acquired;
+        Record = record ?? throw new ArgumentNullException(nameof(record));
+    }
+}
 
 /// <summary>
 /// Repository for purchase and subscription records.
@@ -26,6 +42,37 @@ public interface IPurchaseRepository
     /// Updates an existing purchase record.
     /// </summary>
     Task<bool> UpdatePurchaseAsync(PurchaseRecord record, CancellationToken ct = default);
+
+    /// <summary>
+    /// Atomically creates a new Pending purchase or acquires an expired/retryable
+    /// Pending/Verified record for processing. Terminal and actively leased records are returned
+    /// without acquisition.
+    /// </summary>
+    Task<PurchaseClaimResult> TryClaimPurchaseAsync(
+        PurchaseRecord candidate,
+        string leaseId,
+        DateTime nowUtc,
+        TimeSpan leaseDuration,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Conditionally renews an unexpired purchase lease. Returns false when the lease expired,
+    /// changed owner, or the purchase reached a terminal state.
+    /// </summary>
+    Task<bool> TryRenewPurchaseLeaseAsync(
+        string transactionKey,
+        string expectedLeaseId,
+        DateTime nowUtc,
+        TimeSpan leaseDuration,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Conditionally updates a purchase only when the supplied worker still owns its lease.
+    /// </summary>
+    Task<bool> TryUpdatePurchaseAsync(
+        PurchaseRecord record,
+        string expectedLeaseId,
+        CancellationToken ct = default);
 
     /// <summary>
     /// Gets all purchases for a player.
@@ -57,6 +104,17 @@ public interface IPurchaseRepository
     /// Updates an existing subscription record.
     /// </summary>
     Task<bool> UpdateSubscriptionAsync(SubscriptionRecord record, CancellationToken ct = default);
+
+    /// <summary>
+    /// Atomically updates a subscription only when the durable record does not contain a
+    /// newer lifecycle event. Returns true when the candidate was written or safely ignored
+    /// as stale; false when the record is missing or the conditional write could not complete.
+    /// Implementations must use storage concurrency control so an older parallel webhook
+    /// cannot overwrite a newer transition after provider I/O.
+    /// </summary>
+    Task<bool> TryUpdateSubscriptionIfNotNewerAsync(
+        SubscriptionRecord record,
+        CancellationToken ct = default);
 
     /// <summary>
     /// Gets all subscriptions for a player (including inactive).

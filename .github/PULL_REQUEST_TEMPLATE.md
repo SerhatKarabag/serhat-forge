@@ -15,7 +15,7 @@
 
 - [ ] No credentials, signing files, production identifiers, or personal/player data
 - [ ] No game-specific domain behavior in the default runtime
-- [ ] Optional SDK references remain compile-gated
+- [ ] Third-party SDK references remain isolated in dedicated asmdefs; genuinely optional dependencies remain compile-gated
 - [ ] Unity asset moves preserve `.meta` files and GUIDs
 - [ ] Tests cover the change and important failure paths
 - [ ] Public docs/changelog/package metadata are updated when needed

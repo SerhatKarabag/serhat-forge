@@ -20,21 +20,34 @@ public sealed class VerifyRequest
     public string TransactionId { get; set; } = string.Empty;
 
     /// <summary>
-    /// Receipt payload.
-    /// - iOS: Base64 encoded App Store receipt
-    /// - Android: Purchase token
+    /// Platform verification payload. Google requires the purchase token. Apple verification is
+    /// transaction-ID based and this value must remain empty so raw App Store receipts are not
+    /// transported or persisted.
     /// </summary>
     public string ReceiptPayload { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Stable, non-PII player binding sent to Google Play as the obfuscated account ID.
+    /// Required by production Google verification when account binding is enabled.
+    /// </summary>
+    public string? ExpectedObfuscatedAccountId { get; set; }
+
+    /// <summary>
+    /// Stable UUID supplied to StoreKit as appAccountToken for the authenticated player.
+    /// Required by production Apple verification when account binding is enabled.
+    /// </summary>
+    public string? ExpectedAppleAppAccountToken { get; set; }
+
+    /// <summary>
+    /// Server-authoritative product type from the immutable allowlist snapshot. Apple signed
+    /// transaction type must match this value exactly.
+    /// </summary>
+    public ProductType? ExpectedProductType { get; set; }
 
     /// <summary>
     /// Whether this is a subscription.
     /// </summary>
     public bool IsSubscription { get; set; }
-
-    /// <summary>
-    /// Android: Package name.
-    /// </summary>
-    public string? PackageName { get; set; }
 }
 
 /// <summary>

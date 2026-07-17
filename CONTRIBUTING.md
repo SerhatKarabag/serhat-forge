@@ -29,7 +29,7 @@ For Unity changes, run all EditMode and PlayMode tests from **Window > General >
 ## Code expectations
 
 - Prefer clear composition roots and constructor/injected dependencies over global service location.
-- Keep optional SDK references behind dedicated asmdefs and define constraints.
+- Keep third-party SDK references behind dedicated asmdefs. Use define constraints only when the dependency is genuinely optional and not declared by the owning package.
 - Propagate cancellation through async work and observe tasks that outlive a timeout.
 - Avoid hidden allocations in hot paths; document ownership for pooled objects, Addressables handles, subscriptions, and disposable resources.
 - Add regression tests for behavior changes and negative tests for security boundaries.

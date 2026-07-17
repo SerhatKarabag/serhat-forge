@@ -21,8 +21,10 @@ public sealed class VerifyPurchaseRequestDto
     public string Platform { get; set; } = string.Empty;
     public string ProductId { get; set; } = string.Empty;
     public string TransactionId { get; set; } = string.Empty;
+    /// <summary>
+    /// Google Play purchase token. Must be empty for Apple, which is verified by transaction ID.
+    /// </summary>
     public string ReceiptPayload { get; set; } = string.Empty;
-    public string? PackageName { get; set; }
     public string? ProductType { get; set; }
     public string? TierKey { get; set; }
     public Dictionary<string, string>? Metadata { get; set; }
@@ -39,6 +41,7 @@ public sealed class VerifyPurchaseResponseDto
     public SubscriptionResponseDto? Subscription { get; set; }
     public string? ErrorCode { get; set; }
     public string? ErrorMessage { get; set; }
+    public bool WasDuplicate { get; set; }
 }
 
 public sealed class SubscriptionResponseDto
@@ -49,6 +52,10 @@ public sealed class SubscriptionResponseDto
     public bool AutoRenew { get; set; }
     public DateTime PeriodStartUtc { get; set; }
     public DateTime PeriodEndUtc { get; set; }
+    public DateTime OriginalPurchaseDateUtc { get; set; }
+    public string Platform { get; set; } = string.Empty;
+    public string? GrantedItemId { get; set; }
+    public int? GracePeriodDaysRemaining { get; set; }
 }
 
 /// <summary>
@@ -79,6 +86,35 @@ public sealed class VerifyPurchaseFunction
         _config = config;
         _correlationContext = correlationContext;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Validates only transport-required fields. Platform support remains the service's
+    /// responsibility so unknown values receive the canonical INVALID_PLATFORM response.
+    /// Google identity is the purchase token; its client transaction/order ID is optional.
+    /// </summary>
+    public static string? ValidateRequiredFields(VerifyPurchaseRequestDto? payload)
+    {
+        if (payload == null ||
+            string.IsNullOrWhiteSpace(payload.Platform) ||
+            string.IsNullOrWhiteSpace(payload.ProductId))
+        {
+            return "Platform and ProductId are required";
+        }
+
+        if (string.Equals(payload.Platform, "apple", StringComparison.OrdinalIgnoreCase) &&
+            string.IsNullOrWhiteSpace(payload.TransactionId))
+        {
+            return "TransactionId is required for Apple purchases";
+        }
+
+        if (string.Equals(payload.Platform, "google", StringComparison.OrdinalIgnoreCase) &&
+            string.IsNullOrWhiteSpace(payload.ReceiptPayload))
+        {
+            return "ReceiptPayload purchase token is required for Google purchases";
+        }
+
+        return null;
     }
 
     [Function("VerifyPurchase")]
@@ -129,14 +165,26 @@ public sealed class VerifyPurchaseFunction
                 "[{CorrelationId}] VerifyPurchase: PlayerToken={PlayerToken}, Platform={Platform}, Product={ProductId}",
                 correlationId, SensitiveLogValue.Fingerprint(playerId), payload.Platform, payload.ProductId);
 
+            if ((string.Equals(payload.Platform, "apple", StringComparison.OrdinalIgnoreCase) &&
+                 !_config.Apple.Enabled) ||
+                (string.Equals(payload.Platform, "google", StringComparison.OrdinalIgnoreCase) &&
+                 !_config.Google.Enabled))
+            {
+                return await CreateErrorResponse(
+                    req,
+                    "STORE_DISABLED",
+                    "The requested store is disabled for this deployment",
+                    HttpStatusCode.BadRequest,
+                    correlationId,
+                    stopwatch.ElapsedMilliseconds);
+            }
+
             // Validate request
-            if (string.IsNullOrEmpty(payload.Platform) ||
-                string.IsNullOrEmpty(payload.ProductId) ||
-                string.IsNullOrEmpty(payload.TransactionId) ||
-                string.IsNullOrEmpty(payload.ReceiptPayload))
+            var requiredFieldError = ValidateRequiredFields(payload);
+            if (requiredFieldError != null)
             {
                 return await CreateErrorResponse(req, "MISSING_FIELDS",
-                    "Platform, ProductId, TransactionId, and ReceiptPayload are required",
+                    requiredFieldError,
                     HttpStatusCode.BadRequest, correlationId, stopwatch.ElapsedMilliseconds);
             }
 
@@ -147,12 +195,17 @@ public sealed class VerifyPurchaseFunction
                 Platform = payload.Platform.ToLowerInvariant(),
                 ProductId = payload.ProductId,
                 TransactionId = payload.TransactionId,
-                ReceiptPayload = payload.ReceiptPayload,
-                PackageName = payload.PackageName,
-                Metadata = payload.Metadata
+                // Never pass a legacy/raw Apple receipt into the verification pipeline. Apple's
+                // authoritative lookup uses TransactionId; Google requires ReceiptPayload.
+                ReceiptPayload = string.Equals(
+                    payload.Platform,
+                    "apple",
+                    StringComparison.OrdinalIgnoreCase)
+                    ? string.Empty
+                    : payload.ReceiptPayload
             };
 
-            var result = await _verificationService.VerifyAndGrantAsync(serviceRequest);
+            var result = await _verificationService.VerifyAndGrantAsync(serviceRequest, ct);
 
             // Map response
             var responseDto = new VerifyPurchaseResponseDto
@@ -161,7 +214,8 @@ public sealed class VerifyPurchaseFunction
                 TransactionKey = result.TransactionKey,
                 GrantedItemIds = result.GrantedItemIds,
                 ErrorCode = result.ErrorCode,
-                ErrorMessage = result.ErrorMessage
+                ErrorMessage = result.ErrorMessage,
+                WasDuplicate = result.IsDuplicate
             };
 
             if (result.Subscription != null)
@@ -173,7 +227,11 @@ public sealed class VerifyPurchaseFunction
                     Status = result.Subscription.Status.ToString(),
                     AutoRenew = result.Subscription.AutoRenew,
                     PeriodStartUtc = result.Subscription.PeriodStartUtc,
-                    PeriodEndUtc = result.Subscription.PeriodEndUtc
+                    PeriodEndUtc = result.Subscription.PeriodEndUtc,
+                    OriginalPurchaseDateUtc = result.Subscription.OriginalPurchaseDateUtc,
+                    Platform = result.Subscription.Platform,
+                    GrantedItemId = result.Subscription.GrantedItemId,
+                    GracePeriodDaysRemaining = result.Subscription.GracePeriodDaysRemaining
                 };
             }
 
@@ -185,11 +243,16 @@ public sealed class VerifyPurchaseFunction
 
                 return await CreateErrorResponse(req, result.ErrorCode ?? "VERIFICATION_FAILED",
                     result.ErrorMessage ?? "Verification failed",
-                    HttpStatusCode.BadRequest, correlationId, stopwatch.ElapsedMilliseconds);
+                    result.Retryable
+                        ? HttpStatusCode.ServiceUnavailable
+                        : HttpStatusCode.BadRequest,
+                    correlationId,
+                    stopwatch.ElapsedMilliseconds,
+                    result.Retryable);
             }
 
             _logger.LogInformation(
-                "[{CorrelationId}] Verification succeeded: TransactionToken={TransactionToken}, ItemCount={ItemCount}",
+                "[{CorrelationId}] Verification succeeded: TransactionFingerprint={TransactionFingerprint}, ItemCount={ItemCount}",
                 correlationId,
                 SensitiveLogValue.Fingerprint(result.TransactionKey),
                 result.GrantedItemIds.Count);
@@ -238,9 +301,10 @@ public sealed class VerifyPurchaseFunction
         string message,
         HttpStatusCode statusCode,
         string correlationId,
-        long processingTimeMs)
+        long processingTimeMs,
+        bool retryable = false)
     {
-        var error = ErrorPayload.Create(errorCode, message);
+        var error = ErrorPayload.Create(errorCode, message, retryable);
         var envelope = ResponseEnvelope<VerifyPurchaseResponseDto>.Fail(error, correlationId, processingTimeMs);
         var response = req.CreateResponse(statusCode);
         await response.WriteAsJsonAsync(envelope);

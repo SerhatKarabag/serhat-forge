@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Logging;
+using Serhat.Forge.CloudScript.Framework.Monetization.Configuration;
 using Serhat.Forge.CloudScript.Framework.Monetization.Services;
 using Serhat.Forge.CloudScript.Framework.Monetization.Webhooks;
 using Serhat.Forge.CloudScript.Infrastructure.Security;
@@ -24,18 +25,21 @@ public sealed class GoogleRtdnFunction
 
     private readonly GooglePubSubAuthenticator _authenticator;
     private readonly GoogleRtdnParser _parser;
-    private readonly SubscriptionLifecycleService _lifecycleService;
+    private readonly GoogleRtdnReconciliationService _reconciliationService;
+    private readonly MonetizationConfig _config;
     private readonly ILogger<GoogleRtdnFunction> _logger;
 
     public GoogleRtdnFunction(
         GooglePubSubAuthenticator authenticator,
         GoogleRtdnParser parser,
-        SubscriptionLifecycleService lifecycleService,
+        GoogleRtdnReconciliationService reconciliationService,
+        MonetizationConfig config,
         ILogger<GoogleRtdnFunction> logger)
     {
         _authenticator = authenticator;
         _parser = parser;
-        _lifecycleService = lifecycleService;
+        _reconciliationService = reconciliationService;
+        _config = config;
         _logger = logger;
     }
 
@@ -44,6 +48,11 @@ public sealed class GoogleRtdnFunction
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "webhooks/google")] HttpRequestData req,
         CancellationToken ct)
     {
+        if (!_config.Google.Enabled)
+        {
+            return req.CreateResponse(HttpStatusCode.NotFound);
+        }
+
         IEnumerable<string>? authorizationHeaders = null;
         if (req.Headers.TryGetValues("Authorization", out var values))
         {
@@ -101,19 +110,19 @@ public sealed class GoogleRtdnFunction
                 return req.CreateResponse(HttpStatusCode.OK);
             }
 
-            if (parsed.Event == null)
+            if (parsed.Notification == null)
             {
                 return req.CreateResponse(HttpStatusCode.OK);
             }
 
             _logger.LogInformation(
-                "Processing Google RTDN: Type={EventType}, MessageToken={MessageToken}, SubscriptionToken={SubscriptionToken}",
-                parsed.Event.EventType,
+                "Processing Google RTDN change hint: Kind={NotificationKind}, MessageToken={MessageToken}, PurchaseToken={PurchaseToken}",
+                parsed.Notification.Kind,
                 messageToken,
-                SensitiveLogValue.Fingerprint(parsed.Event.SubscriptionKey));
+                SensitiveLogValue.Fingerprint(parsed.Notification.PurchaseToken));
 
-            var result = await _lifecycleService
-                .ProcessWebhookEventAsync(parsed.Event, ct)
+            var result = await _reconciliationService
+                .ProcessAsync(parsed.Notification, ct)
                 .ConfigureAwait(false);
             if (!result.IsSuccess && !result.IsDuplicate)
             {

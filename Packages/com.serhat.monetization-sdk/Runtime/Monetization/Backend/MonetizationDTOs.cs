@@ -1,3 +1,5 @@
+#nullable enable
+
 using System;
 using System.Collections.Generic;
 using Serhat.Backend.Monetization.Domain;
@@ -9,20 +11,49 @@ namespace Serhat.Backend.Monetization.Backend
     /// </summary>
     public sealed class VerifyPurchaseRequest
     {
+        private string _platform = string.Empty;
+        private string _productId = string.Empty;
+        private string _transactionId = string.Empty;
+        private string _receiptPayload = string.Empty;
+        private string _productType = string.Empty;
+
         /// <summary>Store platform (apple/google).</summary>
-        public string Platform { get; set; } = string.Empty;
+        public string Platform
+        {
+            get => _platform;
+            set => _platform = value ?? string.Empty;
+        }
 
         /// <summary>Store product ID.</summary>
-        public string ProductId { get; set; } = string.Empty;
+        public string ProductId
+        {
+            get => _productId;
+            set => _productId = value ?? string.Empty;
+        }
 
         /// <summary>Transaction ID from the store.</summary>
-        public string TransactionId { get; set; } = string.Empty;
+        public string TransactionId
+        {
+            get => _transactionId;
+            set => _transactionId = value ?? string.Empty;
+        }
 
-        /// <summary>Receipt payload for verification.</summary>
-        public string ReceiptPayload { get; set; } = string.Empty;
+        /// <summary>
+        /// Google Play purchase token. Empty for Apple, whose authoritative lookup uses
+        /// TransactionId and must not transport a raw App Store receipt/JWS.
+        /// </summary>
+        public string ReceiptPayload
+        {
+            get => _receiptPayload;
+            set => _receiptPayload = value ?? string.Empty;
+        }
 
         /// <summary>Product type hint (consumable/non-consumable/subscription).</summary>
-        public string ProductType { get; set; } = string.Empty;
+        public string ProductType
+        {
+            get => _productType;
+            set => _productType = value ?? string.Empty;
+        }
 
         /// <summary>For subscriptions: tier key.</summary>
         public string? TierKey { get; set; }
@@ -36,6 +67,8 @@ namespace Serhat.Backend.Monetization.Backend
     /// </summary>
     public sealed class VerifyPurchaseResponse
     {
+        private List<string> _grantedItemIds = new();
+
         /// <summary>Whether verification succeeded.</summary>
         public bool Success { get; set; }
 
@@ -43,7 +76,11 @@ namespace Serhat.Backend.Monetization.Backend
         public string? TransactionKey { get; set; }
 
         /// <summary>Economy item IDs granted.</summary>
-        public List<string> GrantedItemIds { get; set; } = new();
+        public List<string> GrantedItemIds
+        {
+            get => _grantedItemIds;
+            set => _grantedItemIds = value ?? new List<string>();
+        }
 
         /// <summary>For subscriptions: updated subscription state.</summary>
         public SubscriptionDto? Subscription { get; set; }
@@ -63,7 +100,7 @@ namespace Serhat.Backend.Monetization.Backend
     /// </summary>
     public sealed class GetEntitlementsRequest
     {
-        /// <summary>Whether to force refresh from store (re-verify active subscriptions).</summary>
+        /// <summary>Whether to bypass the client cache and fetch current backend state.</summary>
         public bool ForceRefresh { get; set; }
     }
 
@@ -72,8 +109,14 @@ namespace Serhat.Backend.Monetization.Backend
     /// </summary>
     public sealed class GetEntitlementsResponse
     {
+        private List<EntitlementDto> _entitlements = new();
+
         /// <summary>All active entitlements.</summary>
-        public List<EntitlementDto> Entitlements { get; set; } = new();
+        public List<EntitlementDto> Entitlements
+        {
+            get => _entitlements;
+            set => _entitlements = value ?? new List<EntitlementDto>();
+        }
 
         /// <summary>Active subscription if any.</summary>
         public SubscriptionDto? ActiveSubscription { get; set; }

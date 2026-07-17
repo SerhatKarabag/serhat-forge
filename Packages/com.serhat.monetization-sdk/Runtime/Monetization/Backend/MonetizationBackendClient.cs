@@ -1,3 +1,5 @@
+#nullable enable
+
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,8 +13,8 @@ namespace Serhat.Backend.Monetization.Backend
     /// </summary>
     public sealed class MonetizationBackendClient : IMonetizationBackendClient
     {
-        private const string VerifyPurchaseFunctionName = "IapVerify";
-        private const string GetEntitlementsFunctionName = "IapGetEntitlements";
+        private const string VerifyPurchaseFunctionName = "VerifyPurchase";
+        private const string GetEntitlementsFunctionName = "GetEntitlements";
 
         private readonly ICloudFunctionInvoker _invoker;
         private readonly IClock _clock;
@@ -29,9 +31,17 @@ namespace Serhat.Backend.Monetization.Backend
             VerifyPurchaseRequest request,
             CancellationToken ct = default)
         {
+            if (request == null)
+            {
+                throw new ArgumentNullException(nameof(request));
+            }
+
+            var operationId = Guid.NewGuid();
             var options = new CloudCallOptions()
-                .WithIdempotencyKey(Guid.NewGuid())
-                .WithCorrelationId($"verify:{request.Platform}:{request.TransactionId}");
+                .WithIdempotencyKey(operationId)
+                // A Google transaction ID is the purchase token. Correlation IDs can
+                // be exported to logs and tracing systems, so keep them opaque.
+                .WithCorrelationId($"verify:{_clock.TimestampMs}:{operationId:N}");
 
             return await _invoker.ExecuteAsync<VerifyPurchaseRequest, VerifyPurchaseResponse>(
                 VerifyPurchaseFunctionName, request, options, ct);
@@ -41,6 +51,11 @@ namespace Serhat.Backend.Monetization.Backend
             GetEntitlementsRequest request,
             CancellationToken ct = default)
         {
+            if (request == null)
+            {
+                throw new ArgumentNullException(nameof(request));
+            }
+
             var options = new CloudCallOptions()
                 .WithCorrelationId($"entitlements:{_clock.TimestampMs}");
 

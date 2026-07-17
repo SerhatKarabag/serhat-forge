@@ -1,3 +1,5 @@
+#nullable enable
+
 using System.Collections.Generic;
 using Serhat.Backend.Monetization.Abstractions;
 using Serhat.Backend.Monetization.Domain;
@@ -6,7 +8,9 @@ namespace Serhat.Backend.Monetization.Samples
 {
     /// <summary>
     /// Example implementation of ITierPolicy.
-    /// Each game should implement this interface with their own tier rules.
+    /// Each game should implement this interface with its own tier rules. The base purchase
+    /// service does not execute active-subscription replacement; these values are inputs to a
+    /// project-specific store and backend replacement lifecycle.
     /// </summary>
     /// <remarks>
     /// This example defines a simple 2-tier system:

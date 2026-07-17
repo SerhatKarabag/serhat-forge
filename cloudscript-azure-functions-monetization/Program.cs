@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Serhat.Forge.CloudScript.Framework.Monetization.Configuration;
 using Serhat.Forge.CloudScript.Infrastructure.Logging;
+using Serhat.Forge.CloudScript.Infrastructure.Telemetry;
 
 var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()
@@ -11,6 +12,8 @@ var host = new HostBuilder()
     {
         services.AddApplicationInsightsTelemetryWorkerService();
         services.ConfigureFunctionsApplicationInsights();
+        services.AddApplicationInsightsTelemetryProcessor<GooglePlayPurchaseTokenTelemetryProcessor>();
+        services.AddApplicationInsightsTelemetryProcessor<AppleTransactionIdTelemetryProcessor>();
 
         services.AddMonetization();
         services.AddSingleton<ICorrelationContext, CorrelationContext>();

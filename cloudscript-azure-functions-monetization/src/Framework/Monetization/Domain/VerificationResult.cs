@@ -10,6 +10,7 @@ public sealed record VerificationResult
     public bool IsValid { get; init; }
     public string? ErrorCode { get; init; }
     public string? ErrorMessage { get; init; }
+    public bool IsRetryable { get; init; }
 
     /// <summary>
     /// Product ID from the store.
@@ -61,17 +62,25 @@ public sealed record VerificationResult
     /// </summary>
     public DateTime? GracePeriodEndUtc { get; init; }
 
-    private VerificationResult(bool isValid, string? errorCode = null, string? errorMessage = null)
+    private VerificationResult(
+        bool isValid,
+        string? errorCode = null,
+        string? errorMessage = null,
+        bool isRetryable = false)
     {
         IsValid = isValid;
         ErrorCode = errorCode;
         ErrorMessage = errorMessage;
+        IsRetryable = isRetryable;
     }
 
     public static VerificationResult Valid() => new(true);
 
     public static VerificationResult Invalid(string errorCode, string errorMessage) =>
         new(false, errorCode, errorMessage);
+
+    public static VerificationResult Retryable(string errorCode, string errorMessage) =>
+        new(false, errorCode, errorMessage, isRetryable: true);
 
     public static VerificationResult InvalidReceipt(string? details = null) =>
         new(false, "INVALID_RECEIPT", details ?? "Receipt validation failed");
@@ -83,5 +92,5 @@ public sealed record VerificationResult
         new(false, "PRODUCT_MISMATCH", $"Product mismatch: expected {expected}, got {actual}");
 
     public static VerificationResult StoreError(string message) =>
-        new(false, "STORE_ERROR", message);
+        Retryable("STORE_ERROR", message);
 }

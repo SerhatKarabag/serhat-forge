@@ -42,6 +42,7 @@ jobs:
         uses: game-ci/unity-test-runner@0ff419b913a3630032cbe0de48a0099b5a9f0ed9 # v4.3.1
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
@@ -62,5 +63,6 @@ jobs:
           retention-days: 14
 
 # Enable this workflow by setting repository variable RUN_UNITY_CI=true and
-# configuring the Unity license secrets documented by GameCI. Fork pull requests
-# are intentionally skipped because repository secrets are not exposed to them.
+# configuring the appropriate Personal or Professional Unity license secrets
+# documented by GameCI. Fork pull requests are intentionally skipped because
+# repository secrets are not exposed to them.

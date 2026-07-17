@@ -1,3 +1,5 @@
+#nullable enable
+
 using System;
 
 namespace Serhat.Backend.Monetization.Domain
@@ -37,11 +39,23 @@ namespace Serhat.Backend.Monetization.Domain
     /// </summary>
     public sealed class SubscriptionDto
     {
+        private string _productId = string.Empty;
+        private string _tierKey = string.Empty;
+        private string _platform = string.Empty;
+
         /// <summary>Subscription product ID.</summary>
-        public string ProductId { get; set; } = string.Empty;
+        public string ProductId
+        {
+            get => _productId;
+            set => _productId = value ?? string.Empty;
+        }
 
         /// <summary>Tier key for this subscription level.</summary>
-        public string TierKey { get; set; } = string.Empty;
+        public string TierKey
+        {
+            get => _tierKey;
+            set => _tierKey = value ?? string.Empty;
+        }
 
         /// <summary>Current subscription status.</summary>
         public SubscriptionStatus Status { get; set; }
@@ -59,7 +73,11 @@ namespace Serhat.Backend.Monetization.Domain
         public DateTime OriginalPurchaseDateUtc { get; set; }
 
         /// <summary>Platform where subscription was purchased (apple/google).</summary>
-        public string Platform { get; set; } = string.Empty;
+        public string Platform
+        {
+            get => _platform;
+            set => _platform = value ?? string.Empty;
+        }
 
         /// <summary>Economy item ID granted for this subscription tier.</summary>
         public string? GrantedItemId { get; set; }
