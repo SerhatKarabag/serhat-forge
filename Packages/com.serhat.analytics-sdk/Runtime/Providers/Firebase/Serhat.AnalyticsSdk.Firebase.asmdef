@@ -1,0 +1,26 @@
+{
+    "name": "Serhat.AnalyticsSdk.Firebase",
+    "rootNamespace": "Serhat.Analytics.Providers.Firebase",
+    "references": [
+        "Serhat.AnalyticsSdk.Core",
+        "Serhat.AnalyticsSdk.Providers",
+        "Firebase.Analytics"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "FIREBASE_ANALYTICS_AVAILABLE"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.google.firebase.analytics",
+            "expression": "",
+            "define": "FIREBASE_ANALYTICS_AVAILABLE"
+        }
+    ],
+    "noEngineReferences": false
+}

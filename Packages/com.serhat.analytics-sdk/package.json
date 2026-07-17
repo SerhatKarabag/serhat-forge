@@ -1,0 +1,26 @@
+{
+  "name": "com.serhat.analytics-sdk",
+  "version": "0.1.0-preview.1",
+  "displayName": "Serhat Analytics SDK",
+  "description": "Analytics foundation with provider abstraction, batching, and a persistent offline outbox.",
+  "unity": "6000.3",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SerhatKarabag/serhat-forge.git",
+    "directory": "Packages/com.serhat.analytics-sdk"
+  },
+  "documentationUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.analytics-sdk/README.md",
+  "changelogUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.analytics-sdk/CHANGELOG.md",
+  "licensesUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.analytics-sdk/LICENSE.md",
+  "keywords": [
+    "analytics",
+    "telemetry",
+    "events",
+    "offline"
+  ],
+  "author": {
+    "name": "Serhat Forge"
+  },
+  "dependencies": {}
+}

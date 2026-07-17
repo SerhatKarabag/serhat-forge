@@ -1,0 +1,21 @@
+{
+    "name": "Serhat.Forge.Auth",
+    "rootNamespace": "Serhat.Forge.Auth",
+    "references": [
+        "PlayFab",
+        "PlayFabShared",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "SERHAT_FORGE_AUTH",
+        "PLAYFAB_SDK"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

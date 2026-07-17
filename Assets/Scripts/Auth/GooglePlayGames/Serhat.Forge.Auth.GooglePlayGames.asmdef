@@ -1,0 +1,23 @@
+{
+    "name": "Serhat.Forge.Auth.GooglePlayGames",
+    "rootNamespace": "Serhat.Forge.Auth",
+    "references": [
+        "Serhat.Forge.Auth",
+        "Google.Play.Games"
+    ],
+    "includePlatforms": [
+        "Android"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "SERHAT_FORGE_AUTH",
+        "PLAYFAB_SDK",
+        "GOOGLE_PLAY_GAMES"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

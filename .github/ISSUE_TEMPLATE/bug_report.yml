@@ -1,0 +1,69 @@
+name: Bug report
+description: Report a reproducible problem in the reusable template.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Remove credentials, player data, store receipts, and signing material from logs before attaching them.
+  - type: input
+    id: version
+    attributes:
+      label: Serhat Forge version or commit
+      placeholder: 0.1.0-preview.1 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: unity
+    attributes:
+      label: Unity version
+      placeholder: 6000.3.14f1
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Affected platform
+      options:
+        - Editor
+        - Windows
+        - macOS
+        - Linux
+        - Android
+        - iOS
+        - Server / Azure Functions sample
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Include the smallest clean-clone sequence that reproduces the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized logs
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I reproduced this from a clean clone or described why I could not.
+          required: true
+        - label: I removed secrets and personal/player data from the report.
+          required: true
+        - label: This is not a security vulnerability; those are reported privately via SECURITY.md.
+          required: true

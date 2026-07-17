@@ -1,0 +1,30 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "AZURE_FUNCTIONS_ENVIRONMENT": "Development",
+    "MONETIZATION_STORAGE_CONNECTION": "UseDevelopmentStorage=true",
+    "PLAYFAB_TITLE_ID": "",
+    "PLAYFAB_DEV_SECRET_KEY": "",
+    "USE_FAKE_VERIFIER": "true",
+    "APPLE_BUNDLE_ID": "",
+    "APPLE_APP_ID": "",
+    "APPLE_ISSUER_ID": "",
+    "APPLE_KEY_ID": "",
+    "APPLE_PRIVATE_KEY_BASE64": "",
+    "APPLE_ROOT_CA_BASE64": "",
+    "APPLE_ENVIRONMENT": "Sandbox",
+    "APPLE_CERTIFICATE_REVOCATION_MODE": "Online",
+    "APPLE_MAX_NOTIFICATION_AGE_SECONDS": "604800",
+    "APPLE_SKIP_SIGNATURE_VALIDATION": "false",
+    "GOOGLE_PACKAGE_NAME": "",
+    "GOOGLE_SERVICE_ACCOUNT_EMAIL": "",
+    "GOOGLE_PRIVATE_KEY_BASE64": "",
+    "GOOGLE_PUBSUB_AUDIENCE": "",
+    "GOOGLE_PUBSUB_SERVICE_ACCOUNT_EMAIL": "",
+    "GOOGLE_MAX_MESSAGE_AGE_SECONDS": "604800",
+    "ALLOWED_PRODUCTS_JSON": "{}",
+    "ALLOW_SANDBOX_IN_PRODUCTION": "false"
+  }
+}

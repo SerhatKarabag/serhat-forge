@@ -1,0 +1,48 @@
+key,en,tr
+# ================================
+# UI - General
+# ================================
+ui.play,Play,Oyna
+ui.settings,Settings,Ayarlar
+ui.exit,Exit,Çıkış
+ui.back,Back,Geri
+ui.continue,Continue,Devam
+ui.retry,Retry,Tekrar Dene
+ui.main_menu,Main Menu,Ana Menü
+ui.yes,Yes,Evet
+ui.no,No,Hayır
+ui.ok,OK,Tamam
+ui.cancel,Cancel,İptal
+ui.loading,Loading...,Yükleniyor...
+ui.language,Language,Dil
+
+# ================================
+# Messages
+# ================================
+msg.no_internet,No Internet Connection,İnternet Bağlantısı Yok
+msg.connection_error,Connection Error,Bağlantı Hatası
+msg.welcome,Welcome {0}!,Hoş Geldin {0}!
+
+# ================================
+# Settings
+# ================================
+settings.sound,Sound,Ses
+settings.music,Music,Müzik
+settings.vibration,Vibration,Titreşim
+settings.notifications,Notifications,Bildirimler
+settings.language,Language,Dil
+settings.privacy,Privacy Policy,Gizlilik Politikası
+settings.terms,Terms of Service,Kullanım Şartları
+settings.restore_purchases,Restore Purchases,Satın Alımları Geri Yükle
+settings.delete_account,Delete Account,Hesabı Sil
+settings.logout,Logout,Çıkış Yap
+settings.version,Version {0},Sürüm {0}
+
+# ================================
+# Errors
+# ================================
+error.generic,Something went wrong,Bir şeyler ters gitti
+error.purchase_failed,Purchase failed,Satın alma başarısız
+error.network,Network error,Ağ hatası
+error.server,Server error,Sunucu hatası
+error.timeout,Request timed out,İstek zaman aşımına uğradı

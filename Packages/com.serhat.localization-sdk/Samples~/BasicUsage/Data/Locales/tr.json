@@ -1,0 +1,14 @@
+{
+  "ui.play": "Oyna",
+  "ui.settings": "Ayarlar",
+  "ui.exit": "Cikis",
+  "ui.language": "Dil",
+  "welcome.title": "Hos Geldiniz!",
+  "welcome.message": "Merhaba {0}!",
+  "items.count": {
+    "one": "{0} oge",
+    "other": "{0} oge"
+  },
+  "score.current": "Puan: {0}",
+  "score.high": "En Yuksek Puan: {0}"
+}

@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: nuget
+    directory: /Samples~/GameApiBackend
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: nuget
+    directory: /cloudscript-azure-functions-monetization
+    schedule:
+      interval: monthly

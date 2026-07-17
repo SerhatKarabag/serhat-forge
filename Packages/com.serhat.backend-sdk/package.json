@@ -1,0 +1,36 @@
+{
+  "name": "com.serhat.backend-sdk",
+  "version": "2.1.0-preview.1",
+  "displayName": "Serhat Backend SDK",
+  "description": "Transport-agnostic Unity backend foundation with resilience, persistent outbox, request coalescing, and optional provider adapters.",
+  "unity": "6000.3",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SerhatKarabag/serhat-forge.git",
+    "directory": "Packages/com.serhat.backend-sdk"
+  },
+  "documentationUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.backend-sdk/README.md",
+  "changelogUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.backend-sdk/CHANGELOG.md",
+  "licensesUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.backend-sdk/LICENSE.md",
+  "keywords": [
+    "backend",
+    "resilience",
+    "outbox",
+    "cloudscript",
+    "playfab"
+  ],
+  "author": {
+    "name": "Serhat Forge"
+  },
+  "dependencies": {
+    "com.unity.nuget.newtonsoft-json": "3.2.2"
+  },
+  "samples": [
+    {
+      "displayName": "Game API Reference",
+      "description": "Optional game-specific client example. Enable SERHAT_FORGE_GAME_API_SAMPLE after importing.",
+      "path": "Samples~/GameApi"
+    }
+  ]
+}

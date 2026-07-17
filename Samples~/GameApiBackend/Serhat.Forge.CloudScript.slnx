@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Serhat.Forge.CloudScript.csproj" />
+  <Project Path="../../cloudscript-azure-functions-monetization/Serhat.Forge.Monetization.CloudScript.csproj" />
+  <Project Path="tests/Serhat.Forge.CloudScript.Tests.csproj" />
+</Solution>

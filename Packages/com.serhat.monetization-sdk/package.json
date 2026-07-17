@@ -1,0 +1,36 @@
+{
+  "name": "com.serhat.monetization-sdk",
+  "version": "0.1.0-preview.1",
+  "displayName": "Serhat Monetization SDK",
+  "description": "Optional Unity IAP client layer with backend verification and subscription policy abstractions.",
+  "unity": "6000.3",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SerhatKarabag/serhat-forge.git",
+    "directory": "Packages/com.serhat.monetization-sdk"
+  },
+  "documentationUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.monetization-sdk/README.md",
+  "changelogUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.monetization-sdk/CHANGELOG.md",
+  "licensesUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.monetization-sdk/LICENSE.md",
+  "keywords": [
+    "monetization",
+    "iap",
+    "subscriptions",
+    "store"
+  ],
+  "author": {
+    "name": "Serhat Forge"
+  },
+  "dependencies": {
+    "com.serhat.backend-sdk": "2.1.0-preview.1",
+    "com.unity.purchasing": "5.2.0"
+  },
+  "samples": [
+    {
+      "displayName": "Monetization Example",
+      "description": "Shows catalog and purchase wiring with a development-only mock backend that fails closed in release players",
+      "path": "Samples~/MonetizationExample"
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+# Normalize text while preserving Unity-friendly line endings.
+* text=auto
+
+*.cs text eol=lf
+*.asmdef text eol=lf
+*.asmref text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.xml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.ps1 text eol=lf
+*.props text eol=lf
+*.shader text eol=lf
+*.hlsl text eol=lf
+*.cginc text eol=lf
+*.mm text eol=lf
+*.h text eol=lf
+
+# Unity YAML assets should remain text and are easier to review with stable LF endings.
+*.meta text eol=lf
+*.asset text eol=lf linguist-language=YAML
+*.prefab text eol=lf linguist-language=YAML
+*.unity text eol=lf linguist-language=YAML
+*.mat text eol=lf linguist-language=YAML
+*.controller text eol=lf linguist-language=YAML
+*.anim text eol=lf linguist-language=YAML
+
+# Binary assets.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.psd binary
+*.tga binary
+*.ttf binary
+*.otf binary
+*.wav binary
+*.mp3 binary
+*.ogg binary
+*.mp4 binary
+*.mov binary
+*.dll binary
+*.aar binary
+*.jar binary
+*.so binary
+*.a binary
+*.bundle binary
+*.unitypackage binary

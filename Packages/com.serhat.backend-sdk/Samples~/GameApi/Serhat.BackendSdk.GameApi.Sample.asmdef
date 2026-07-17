@@ -1,0 +1,29 @@
+{
+    "name":  "Serhat.BackendSdk.GameApi.Sample",
+    "rootNamespace":  "Serhat.Backend.Samples",
+    "references":  [
+                       "Serhat.BackendSdk.Core",
+                       "Serhat.BackendSdk.PlayFab",
+                       "Serhat.BackendSdk.GameApi"
+                   ],
+    "includePlatforms":  [
+
+                         ],
+    "excludePlatforms":  [
+
+                         ],
+    "allowUnsafeCode":  false,
+    "overrideReferences":  false,
+    "precompiledReferences":  [
+
+                              ],
+    "autoReferenced":  true,
+    "defineConstraints":  [
+                              "SERHAT_FORGE_GAME_API_SAMPLE",
+                              "PLAYFAB_SDK"
+                          ],
+    "versionDefines":  [
+
+                       ],
+    "noEngineReferences":  false
+}

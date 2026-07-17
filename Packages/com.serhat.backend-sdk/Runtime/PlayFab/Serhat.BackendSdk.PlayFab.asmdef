@@ -1,0 +1,19 @@
+{
+    "name": "Serhat.BackendSdk.PlayFab",
+    "rootNamespace": "Serhat.Backend.PlayFab",
+    "references": [
+        "Serhat.BackendSdk.Core",
+        "PlayFab"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "PLAYFAB_SDK"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

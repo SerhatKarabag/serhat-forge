@@ -1,0 +1,17 @@
+{
+    "name": "Serhat.Localization.Runtime",
+    "rootNamespace": "Serhat.Localization",
+    "references": [
+        "Unity.TextMeshPro",
+        "Serhat.Core.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

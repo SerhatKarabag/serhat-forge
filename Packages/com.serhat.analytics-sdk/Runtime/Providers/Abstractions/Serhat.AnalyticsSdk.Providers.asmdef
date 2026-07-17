@@ -1,0 +1,16 @@
+{
+    "name": "Serhat.AnalyticsSdk.Providers",
+    "rootNamespace": "Serhat.Analytics.Providers",
+    "references": [
+        "Serhat.AnalyticsSdk.Core"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

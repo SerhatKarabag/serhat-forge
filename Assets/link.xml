@@ -1,0 +1,21 @@
+<linker>
+  <!--
+    Zenject injects these first-party types through private members or reflection-created
+    constructors. Keep the complete types so IL2CPP and managed stripping cannot remove
+    injection points that are not visible to Unity's static analysis.
+  -->
+  <assembly fullname="Assembly-CSharp">
+    <type fullname="Serhat.Forge.Audio.SoundManager" preserve="all" />
+    <type fullname="Serhat.Forge.Ads.AdButton" preserve="all" />
+    <type fullname="Serhat.Forge.Content.ContentDownloadUI" preserve="all" />
+    <type fullname="Serhat.Forge.Startup.GameBootstrapper" preserve="all" />
+    <type fullname="Serhat.Forge.Demo.ForgeDemoPanel" preserve="all" />
+    <type fullname="Serhat.Forge.UI.Navigation.PageNavbar" preserve="all" />
+    <type fullname="Serhat.Forge.UI.Navigation.SwipePageShortcutButton" preserve="all" />
+    <type fullname="Serhat.Forge.UI.Components.PopupToggleButton" preserve="all" />
+    <type fullname="Serhat.Forge.Content.PrefabLoaderService" preserve="all" />
+    <type fullname="Serhat.Forge.Startup.StartupPipeline" preserve="all" />
+    <type fullname="Serhat.Forge.Audio.NullAudioService" preserve="all" />
+    <type fullname="Serhat.Forge.UI.Components.NullLoadingScreen" preserve="all" />
+  </assembly>
+</linker>

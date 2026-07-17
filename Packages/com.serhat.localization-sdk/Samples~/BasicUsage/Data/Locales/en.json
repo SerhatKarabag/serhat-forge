@@ -1,0 +1,14 @@
+{
+  "ui.play": "Play",
+  "ui.settings": "Settings",
+  "ui.exit": "Exit",
+  "ui.language": "Language",
+  "welcome.title": "Welcome!",
+  "welcome.message": "Hello {0}!",
+  "items.count": {
+    "one": "{0} item",
+    "other": "{0} items"
+  },
+  "score.current": "Score: {0}",
+  "score.high": "High Score: {0}"
+}

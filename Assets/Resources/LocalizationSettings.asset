@@ -1,0 +1,22 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 50c0758620c079148b6d29b6f3cfb31b, type: 3}
+  m_Name: LocalizationSettings
+  m_EditorClassIdentifier: Serhat.Localization.Runtime::Serhat.Localization.LocalizationSettings
+  _defaultLocale: en
+  _supportedLocales:
+  - en
+  - tr
+  _providerType: 0
+  _dataPath: Localization/Locales
+  _autoInitialize: 1
+  _useSystemLanguage: 1

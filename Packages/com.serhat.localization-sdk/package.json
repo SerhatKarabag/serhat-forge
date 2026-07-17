@@ -1,0 +1,37 @@
+{
+  "name": "com.serhat.localization-sdk",
+  "version": "0.1.0-preview.1",
+  "displayName": "Serhat Localization SDK",
+  "description": "Localization runtime with language switching, fallback chains, pluralization, formatting, and TextMeshPro integration.",
+  "unity": "6000.3",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SerhatKarabag/serhat-forge.git",
+    "directory": "Packages/com.serhat.localization-sdk"
+  },
+  "documentationUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.localization-sdk/README.md",
+  "changelogUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.localization-sdk/CHANGELOG.md",
+  "licensesUrl": "https://github.com/SerhatKarabag/serhat-forge/blob/main/Packages/com.serhat.localization-sdk/LICENSE.md",
+  "keywords": [
+    "localization",
+    "i18n",
+    "translation",
+    "language",
+    "textmeshpro"
+  ],
+  "author": {
+    "name": "Serhat Forge"
+  },
+  "dependencies": {
+    "com.serhat.core-sdk": "0.1.0-preview.1",
+    "com.unity.textmeshpro": "5.0.0"
+  },
+  "samples": [
+    {
+      "displayName": "Basic Usage",
+      "description": "Basic localization sample with language switching",
+      "path": "Samples~/BasicUsage"
+    }
+  ]
+}

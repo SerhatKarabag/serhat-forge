@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <!-- Firebase Unity SDK assemblies target .NET Framework 4.7.2. -->
+    <!-- Unity-generated projects default to v4.7.1, which breaks CLI MSBuild resolution. -->
+    <TargetFrameworkVersion Condition="'$(TargetFrameworkVersion)' == 'v4.7.1'">v4.7.2</TargetFrameworkVersion>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,13 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "AZURE_FUNCTIONS_ENVIRONMENT": "Development",
+    "PLAYFAB_TITLE_ID": "",
+    "PLAYFAB_DEV_SECRET_KEY": "",
+    "AZURE_STORAGE_CONNECTION_STRING": "UseDevelopmentStorage=true",
+    "IDEMPOTENCY_TABLE_NAME": "IdempotencyStore",
+    "IDEMPOTENCY_TTL_HOURS": "24"
+  }
+}
