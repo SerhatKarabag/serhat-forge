@@ -72,7 +72,7 @@ function Get-PublishableFiles {
     )) {
         $candidate = Join-Path $root $relativePath
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            Get-Item -LiteralPath $candidate
+            Get-Item -LiteralPath $candidate -Force
         }
     }
 }
