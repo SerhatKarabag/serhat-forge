@@ -50,7 +50,7 @@ function Get-PublishableFiles {
             continue
         }
 
-        Get-ChildItem -LiteralPath $candidate -Recurse -File -ErrorAction Stop |
+        Get-ChildItem -LiteralPath $candidate -Recurse -File -Force -ErrorAction Stop |
             Where-Object {
                 $extensions -contains $_.Extension.ToLowerInvariant() -and
                 $_.FullName -notmatch '[\\/](Library|Temp|Logs|obj|bin)[\\/]'
@@ -270,7 +270,7 @@ $riskyNames = @(
     'service-account.json'
 )
 foreach ($name in $riskyNames) {
-    Get-ChildItem -LiteralPath $root -Recurse -File -Filter $name -ErrorAction SilentlyContinue |
+    Get-ChildItem -LiteralPath $root -Recurse -File -Force -Filter $name -ErrorAction SilentlyContinue |
         Where-Object { $_.FullName -notmatch '[\\/](Library|Temp|Logs|obj|bin)[\\/]' } |
         ForEach-Object { Add-Issue "Risky configuration file is present: $($_.FullName.Substring($root.Length + 1))." }
 }
@@ -378,7 +378,7 @@ foreach ($file in $jsonFiles) {
 }
 
 $metaGuids = @{}
-Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.meta' -ErrorAction Stop |
+Get-ChildItem -LiteralPath $root -Recurse -File -Force -Filter '*.meta' -ErrorAction Stop |
     Where-Object { $_.FullName -notmatch '[\\/](Library|Temp|Logs|obj|bin)[\\/]' } |
     ForEach-Object {
         $match = Select-String -LiteralPath $_.FullName -Pattern '^guid:[ \t]*([0-9a-fA-F]{32})[ \t]*$' |
