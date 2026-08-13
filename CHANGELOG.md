@@ -17,6 +17,11 @@ All notable changes to Serhat Forge are documented in this file. The project fol
 - Deterministic Android/iOS IL2CPP batch-build entry points and CI artifact retention.
 - Hardened cloud monetization identity, replay/idempotency, legacy-endpoint shutdown, and negative security tests.
 
+### Fixed
+
+- Firebase analytics provider assembly could never compile: it referenced `Firebase.Analytics` as an assembly-definition name, but the Firebase Unity SDK ships only precompiled DLLs. It now declares the plugin DLLs it actually uses, so defining `FIREBASE_ANALYTICS_AVAILABLE` produces a working provider instead of a silently missing one.
+- Firebase events lost their original timestamp. Batching and the offline queue can hand an event to Firebase long after it happened — up to the seven-day offline retention — and Firebase stamps events when `LogEvent` is called, so offline sessions landed in GA4 dated at reconnection and skewed retention and daily metrics. Every event now carries its creation time as an `event_time_ms` parameter.
+
 ### Changed
 
 - **Breaking configuration:** removed the manual `UNITY_PURCHASING` gate and setup-wizard toggle. The monetization core and Unity IAP adapter now compile as separate assemblies whenever the package is installed; games activate purchasing only by wiring the store, catalog, verified backend, and service lifecycle in their composition root.

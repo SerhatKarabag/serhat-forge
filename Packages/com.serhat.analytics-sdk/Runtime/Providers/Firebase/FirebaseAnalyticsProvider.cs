@@ -70,14 +70,25 @@ namespace Serhat.Analytics.Providers.Firebase
                 var eventName = FirebaseEventMapper.MapEventName(evt.EventName);
                 var parameters = FirebaseEventMapper.MapParameters(evt.Parameters);
 
-                if (parameters.Length == 0)
-                {
-                    global::Firebase.Analytics.FirebaseAnalytics.LogEvent(eventName);
-                }
-                else
-                {
-                    global::Firebase.Analytics.FirebaseAnalytics.LogEvent(eventName, parameters);
-                }
+                // Carry the event's own creation time.
+                //
+                // Firebase stamps an event at the moment LogEvent is called, and this SDK can hand
+                // it over much later: batching delays by up to BatchingOptions.FlushInterval, and
+                // the offline store holds events for up to OfflineQueueOptions.RetentionPeriod
+                // (seven days by default). A session played on a plane therefore lands in GA4 dated
+                // at reconnection, which silently skews retention cohorts and daily curves — the
+                // numbers look fine, they are just wrong.
+                //
+                // GA4's client SDKs cannot override event_timestamp, so the true time rides along
+                // as a parameter and late arrivals stay recoverable in analysis. Applied here
+                // rather than at the call site so the service's own session_start / session_end
+                // events — the ones retention is computed from — are covered too.
+                var withTime = new global::Firebase.Analytics.Parameter[parameters.Length + 1];
+                Array.Copy(parameters, withTime, parameters.Length);
+                withTime[parameters.Length] =
+                    new global::Firebase.Analytics.Parameter("event_time_ms", evt.TimestampMs);
+
+                global::Firebase.Analytics.FirebaseAnalytics.LogEvent(eventName, withTime);
 
                 Logger?.Debug("Firebase event logged: {0}", evt.EventName);
             }
