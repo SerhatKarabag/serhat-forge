@@ -3,14 +3,18 @@
     "rootNamespace": "Serhat.Analytics.Providers.Firebase",
     "references": [
         "Serhat.AnalyticsSdk.Core",
-        "Serhat.AnalyticsSdk.Providers",
-        "Firebase.Analytics"
+        "Serhat.AnalyticsSdk.Providers"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
-    "overrideReferences": false,
-    "precompiledReferences": [],
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "Firebase.App.dll",
+        "Firebase.Analytics.dll",
+        "Firebase.Platform.dll",
+        "Firebase.TaskExtension.dll"
+    ],
     "autoReferenced": true,
     "defineConstraints": [
         "FIREBASE_ANALYTICS_AVAILABLE"
